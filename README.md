@@ -10,5 +10,5 @@ By using your model output along with a combination of in-situ and remotely-sens
 
 ## Authors 
 * [Luke Colosi](https://lcolosi.github.io/)<<lcolosi@ucsd.edu>>
-* [Sarah Gille](https://lcolosi.github.io/)<<sgille@ucsd.edu>>
-* [Matt Mazloff](https://lcolosi.github.io/)<<mmazloff@ucsd.edu>>
+* [Sarah Gille](https://sgille.scrippsprofiles.ucsd.edu/)<<sgille@ucsd.edu>>
+* [Matt Mazloff](https://mmazloff.scrippsprofiles.ucsd.edu/)<<mmazloff@ucsd.edu>>
