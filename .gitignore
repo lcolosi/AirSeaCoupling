@@ -4,6 +4,7 @@
 data/
 
 # Figs directory
+figs/spray_glider/
 
 # Docs directory
 docs/
@@ -12,4 +13,7 @@ docs/
 
 # Tools directory
 
+# Miscellaneous 
+.python-version
+src/__pycache__/
 
