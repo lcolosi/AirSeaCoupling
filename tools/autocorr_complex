@@ -1,0 +1,469 @@
+# Complex-valued Autocorrelation Analysis functions
+## Luke Colosi | lcolosi@ucsd.edu 
+
+#--- Autocorrelation and Autocovariance Function ---# 
+def compute_complex_autocorr(data, window, lag, task, bias):
+
+    """
+    coef_pos, coef_neg, cov_pos, cov_neg = compute_autocorr(data, window, lag, task, bias)
+
+    Function for computing the autocovariance and autocorrelation 
+    functions for positive and negative lag.
+    
+        Parameters
+        ----------
+        data : array
+            Time or spatial series of complex valued data. This data must be preprocessed in the following ways:
+            1) Detrend to remove any signal that is undesirable in the autocovariance function (detrend real and imaginary components).
+            2) Missing data gaps are filled with NaN values to ensure a continuous time series.
+            3) Flagged data should be replaced with NaN values.
+            
+        window : int
+            Time/spatial interval length to which the fixed time series will be set for computing autocovariance.
+            Options include the full time/spatial series or varying lengths from the beginning of the time series 
+            to a desired point (i.e. day, week, month, etc.). This depends on the sampling frequency on the 
+            data. 
+            Ex: window = len(data) (full time series) 
+                window = 7 (week when data collected at a daily sampling rate)
+            
+        lag : int
+            The desired number of lags for computing the correlation. The specified amount of lags is highly dependent
+            on the window length of the time series. You want to set the amount of lags to a value where the 
+            correlation coefficent is for the proper amount of iterations along to fixed time series.
+            Ex: lag_dt = len(data) (compute correlation coefficient at lag decreasing by one measurement at a time).
+            
+        task : str
+            Specifies whether to compute the autocovariance function for the entire time series or just windows.
+            Options: 'full' or 'window'.
+            
+        bias : str
+            Specifies whether the covariance is biased or unbiased. The unbiased estimate is normalized by
+            1/n-m whereas the biased estimate is normalized by 1/n where n = total number of data points in time
+            series and m is the lag time from 0 lag. Furthermore, specifies whether the correlation coefficent is biased 
+            or unbaised using the same normalizations in numerator (unbiased (normalized by 1/n-m) or biased
+            (normalized by 1/n)) and the normalization 1/n for both cases in the demominator. 
+            Options: 'biased' or 'unbiased'.
+            
+        Returns
+        -------
+        coef_pos : array
+            Positive lag complex autocorrelation function.
+            
+        coef_neg : array
+            Negative lag complex autocorrelation function.
+            
+        cov_pos : array
+            Positive lag complex autocovariance function.
+            
+        cov_neg : array
+            Negative lag complex autocovariance function.
+
+        Libraries necessary to run function
+        -----------------------------------
+        import numpy as np 
+
+    """
+
+    # Import libraries 
+    import numpy as np
+
+    # Choose interval length n which the correlation coefficient will be computed (Counting and discouting masked elements)
+    N = window
+    N_eff = np.sum(~data.mask)
+
+    # Initialize autocovariance and autocorrelation arrays
+    coef       = np.zeros(lag, dtype=complex)
+    cov        = np.zeros(lag, dtype=complex)
+    c_pairs_m  = np.zeros(lag)
+    c_pairs_nm = np.zeros(lag)
+
+    # Set fixed data segments
+    if task == 'window':
+        fix = data[:N]
+
+    # Loop through each lag interval to compute the correlation and covariance    
+    for i in range(lag):
+
+        # Set running and fixed window
+
+        #--- Full record ---# 
+        if task == 'full':
+
+            # Set running data segment forwards
+            running = data[i:N]
+
+            # Set running data segment backwards
+            fix = data[:N-i]
+
+            #--- Windowed record ---# 
+        elif task == 'window':
+
+            # Set running data segment fowards
+            ind_run_i = i * N
+            ind_run_f = ind_run_i + N
+            running = data[ind_run_i:ind_run_f]
+        
+        # Remove mean from each segment before computing covariance and correlation
+        fix -= np.ma.mean(data)
+        running -= np.ma.mean(data)
+
+        # Compute the correlation coefficient terms at lag time i
+        inner_product = np.sum(fix * np.conj(running))
+
+        # Set the normalization factor for the autocorrelation 
+        if i == 0:
+            inner_product_0 = np.sum(fix * np.conj(running))
+
+        # Compute the number of data pairs counting pairs with masked values
+        n = len(running)  # Equivalent to N - i 
+        c_pairs_m[i] = n
+
+        # Compute number of data pairs discounting pairs with masked vaules
+        combined_mask = np.logical_or(fix.mask, running.mask)
+        n_eff = np.sum(~combined_mask)
+        c_pairs_nm[i] = n_eff
+        
+        # Compute autocorrelation and autocovariance
+
+        #--- Unbiased ---# 
+        if bias == 'unbiased':
+            coef[i] = (1 / n_eff) * inner_product / ((1 / N_eff) * inner_product_0)
+            cov[i] = (1 / n_eff) * inner_product
+
+        #--- Unbiased Tapered ---# 
+        if bias == 'unbiased_tapered':
+            coef[i] = (1 / n_eff) * (n / N) * inner_product / ((1 / N_eff) * inner_product_0)
+            cov[i] = (1 / n_eff) * (n / N) * inner_product
+
+        #--- Biased ---# 
+        elif bias == 'biased':
+            coef[i] = inner_product / inner_product_0  # 1/N_eff is in numerator and denominator, so the cancel out
+            cov[i] = (1 / N_eff) * inner_product
+    
+    # Combine positive and negative lag autocorrelation and autocovariance 
+    coef_pos = coef
+    coef_neg = np.flip(coef)[:-1]
+    cov_pos = cov
+    cov_neg = np.flip(cov)[:-1]
+    
+    return coef_pos, coef_neg, cov_pos, cov_neg, c_pairs_m, c_pairs_nm
+
+
+
+
+
+#--- Decorrelation scale Function ---# 
+def decor_scale_complex(data, dt, estimator):
+    """
+    N_eff, tau = decor_scale(data, dt, estimator)
+
+    Compute the number of independent samples and decorrelation scale.
+    
+        Parameters
+        ----------
+        data : np.array
+            A column vector of dependent data evenly spaced with respect to an arbitrary independent variable t.
+        dt : float
+            Separation between data points.
+        estimator: str
+            String specifying the type of autocorrelation estimator. Options include: 'biased', 'unbiased', and 'unbiased_tapered'
+        
+        Returns
+        -------
+        N_eff : float
+            Number of independent samples in the data record.
+        tau : float
+            Decorrelation scale in units of dt.
+    """
+
+    # Import libraries 
+    import numpy as np
+    from autocorr import compute_complex_autocorr
+    from scipy.integrate import trapezoid
+
+    #--- Compute the autocorrelation function ---# 
+    coef_pos, coef_neg, _, _, _, _ = compute_complex_autocorr(data, len(data), len(data), 'full', estimator)
+
+    # Define the real and imaginary parts of the autocorrelation function 
+    coef_pos_re = coef_pos.real
+    coef_neg_re = coef_neg.real
+    coef_pos_im = coef_pos.imag
+    coef_neg_im = coef_neg.imag
+    
+    #--- Compute scaling factor for N_eff for multiple integration limits ---# 
+
+    # Set the length of data series and data interval
+    N = len(coef_pos_re)  # length of one-sided autocorrelation function
+    T = N * dt            # length of the data series
+    
+    # Initialize scale_N variable
+    scale_N_re = np.zeros(N)
+    scale_N_im = np.zeros(N)
+    
+    # Loop through 
+    for i in range(N):
+
+        # Index autocorrelation function 
+
+        #--- Zeroth lag ---# 
+        if i == 0:
+
+            # Set interal of the autocorrelation function to zero (intergration range vanishes)
+            iscale_re = 0 
+            iscale_im = 0  
+
+        #--- Higher Order lag ---#     
+        else:
+
+            # Index the autocorrelation function and combine the negative and positive lagged autocorrelation functions 
+            coef_re = np.concatenate((coef_neg_re[N-i-1:], coef_pos_re[:i+1]))
+            coef_im = np.concatenate((coef_neg_im[N-i-1:], coef_pos_im[:i+1]))
+
+            # Compute time lag
+            t = i * dt
+
+            # Compute integral of autocorrelation function 
+            iscale_re = trapezoid((1 - (t / T)) * coef_re, dx=dt)
+            iscale_im = trapezoid((1 - (t / T)) * coef_im, dx=dt)
+        
+        # Save the ith scaling factor
+        scale_N_re[i] = iscale_re
+        scale_N_im[i] = iscale_im
+
+    # Find the maximum decorrelation time scale (conservative estimate)
+    tau_re = np.nanmax(scale_N_re)
+    tau_im = np.nanmax(scale_N_im)
+
+    # Compute N_eff (degrees of freedom)
+    N_eff_re = T / tau_re if tau_re != 0 else np.inf
+    N_eff_im = T / tau_im if tau_im != 0 else np.inf
+    
+    return N_eff_re, N_eff_im, tau_re, tau_im
+
+
+#--- 2D-Vectoral Autocorrelation Glider transect function ---# 
+def compute_glider_autocorr_complex(dist, u, v, water_depth, L, on_lim, off_lim, dir, estimator):
+
+    """
+    autocorr_on, autocorr_off, tau_on, tau_off, dist_on, dist_off = compute_glider_autocorr(dist, u, v, water_depth, L, on_lim, off_lim, idir, estimator)
+
+    Function for computing the autocorrelation functions for 2D-vectoral quantities for on- and off-shelf regions for a given glider transect.
+    
+        Parameters
+        ----------
+        dist : array (units: kilometers)
+            Distance from shore (releative to point conception) for a single glider transect. 
+
+        u : array (units: dependent on vectoral quantity)
+            x-component of the vectoral data along the spray glider transect. This can be for example the x-component of velocity. 
+
+        v : array (units: dependent on vectoral quantity)
+            y-component of the vectoral data along the spray glider transect. This can be for example the y-component of velocity. 
+            
+        water_depth : array (units: meters)
+            Water depth along the glider transect referenced to the ocean surface (z = 0 with the ocean interior being negative)
+            
+        L : float (units: kilometers)
+            The distance between point for the along track regular spatial grid.  
+            
+        on_lim : float (units: meters)
+            
+        off_lim : float (units: meters)
+            
+        idir : Float (units: [])
+
+        estimator: str
+            String specifying the type of autocorrelation estimator. Options include: 'biased', 'unbiased', and 'unbiased_tapered'
+             
+        Returns
+        -------
+        autocorr_on : array
+            Positive lag autocorrelation function for the on-shelf region.
+            
+        autocorr_off : array
+            Positive lag autocorrelation function for the off-shelf region.
+            
+        tau_on : float
+            
+        tau_off : float
+
+        dist_on : array
+
+        dist_off : array
+            
+        Libraries necessary to run function
+        -----------------------------------
+        import numpy as np 
+        from autocorr import compute_autocorr, decor_scale
+        from lsf import detrend
+
+    """
+
+    # Import libraries 
+    import numpy as np
+    import pandas as pd
+    from autocorr import compute_complex_autocorr, decor_scale_complex
+    from lsf import detrend
+
+    #--- Bin the data and water depth onto a regular spatial grid ---# 
+
+    # Set the bin edges of uniform spatial along track grid
+    if dir == -1:
+        dist_edges = np.arange(dist[-1],dist[0] + L, L)  
+    else: 
+        dist_edges = np.arange(dist[0],dist[-1] + L, L)  
+
+    # Set the bin center for the uniform spatial along track grid  
+    dist_bin = dist_edges[:-1] + np.diff(dist_edges)/2 
+
+    # Create a pandas DataFrame
+    df = pd.DataFrame({'distance': dist, 'u': u, 'v':v, 'water_depth': water_depth})
+
+    # Assign each data point to a bin
+    df['bin'] = pd.cut(df['distance'], bins=dist_edges, labels=dist_bin, include_lowest=True)
+
+    # Compute bin-averaged data and water depth
+    binned_data = df.groupby('bin').agg(
+        mean_u =('u', 'mean'),
+        std_u =('u', 'std'),
+        mean_v =('v', 'mean'),
+        std_v =('v', 'std'),
+        mean_water_depth=('water_depth', 'mean'),
+        std_water_depth=('water_depth', 'std'),
+        count=('u', 'count')  
+    ).reset_index()
+
+    # Extract data from dataframe and mask NaNs 
+    u_bin = np.ma.masked_invalid(binned_data['mean_u'].values)
+    v_bin = np.ma.masked_invalid(binned_data['mean_v'].values)
+    water_depth_bin = np.ma.masked_invalid(binned_data['mean_water_depth'].values)
+    counts = np.ma.masked_invalid(binned_data['count'].values)
+
+    #--- Split record into on-shelf and off-shelf regions ---# 
+
+    #--- On-Shelf ---# 
+
+    # Fill masked values with 9999 (for preserving masked elements in the array when indexing for on-shelf case)
+    water_depth_bin_fill = np.array(water_depth_bin.filled(9999))
+
+    # Find the indices for on-shelf 
+    idx_on = water_depth_bin_fill >= on_lim
+
+    # Grab distance, data, and water depth from binned data
+    dist_on_fill = dist_bin[idx_on]
+    u_on_fill = u_bin[idx_on]
+    v_on_fill = v_bin[idx_on]
+    water_depth_on_fill = water_depth_bin_fill[idx_on]
+
+    #--- Remove any fill values at the end of the record ---# 
+
+    # Find the indices of all the filled values and take their difference
+    idx_fill = np.where(water_depth_on_fill == 9999)[0]
+    idx_fill_diff = np.diff(idx_fill)
+
+    # Find the index of the last one in the sequence if masked values are present in the record
+    if len(idx_fill_diff) == 0:
+
+        # Set distance, data, and water depth to un-indexed variables when no masked values are present
+        dist_on = dist_on_fill
+        u_on = u_on_fill
+        v_on = v_on_fill
+        water_depth_on_fill_trim = water_depth_on_fill
+
+    elif len(idx_fill_diff) != 0:
+
+        #--- If no fill values at the end of the record ---# 
+        if idx_fill_diff[-1] != 1:
+
+            # Set index to 0
+            idx_one = -1 
+
+        #--- If fill values do exist at the end of the record ---# 
+        else:
+            idx_one = len(idx_fill_diff) - np.argmax(idx_fill_diff[::-1] != 1)
+
+        # Remove fill values at the beginning 
+        dist_on = dist_on_fill[:idx_fill[idx_one]]
+        u_on = u_on_fill[:idx_fill[idx_one]]
+        v_on = v_on_fill[:idx_fill[idx_one]]
+        water_depth_on_fill_trim = water_depth_on_fill[:idx_fill[idx_one]]
+
+    # Replace rest of the filled values with masks (for preserving masked elements in the array)
+    water_depth_on = np.ma.masked_equal(water_depth_on_fill_trim, 9999)
+
+    #--- Off-Shelf ---#
+
+    # Fill masked values with -9999 (for preserving masked elements in the array when indexing for off-shelf)
+    water_depth_bin_fill = np.array(water_depth_bin.filled(-9999))
+
+    # Find the indices for off and on shelf 
+    idx_off = water_depth_bin_fill <= off_lim
+
+    # Grab distance, data, and water depth from binned data
+    dist_off_fill = dist_bin[idx_off]
+    u_off_fill = u_bin[idx_off]
+    v_off_fill = v_bin[idx_off]
+    water_depth_off_fill = water_depth_bin_fill[idx_off]
+
+    #--- Remove any fill values at the beginning of the record ---#
+
+    # Find the indices of all the filled values and take their difference
+    idx_fill = np.diff(np.where(water_depth_off_fill == -9999))[0]
+
+    # Find the index of the last one in the sequence if masked values are present in the record
+    if len(idx_fill) == 0:
+
+        # Set distance, data, and water depth to un-indexed variables when no masked values are present
+        dist_off = dist_off_fill
+        u_off = u_off_fill
+        v_off = v_off_fill
+        water_depth_off_fill_trim = water_depth_off_fill
+
+    elif len(idx_fill) != 0:
+
+        #--- If no fill values at the beginning of the record ---# 
+        if idx_fill[0] != 1:
+
+            # Set index to 0
+            idx_one = 0  
+
+        #--- If fill values do exist at the beginning of the record ---# 
+        else:
+            idx_one = np.argmax(idx_fill != 1) - 1 if np.any(idx_fill != 1) else len(idx_fill) - 1
+
+        # Remove fill values at the beginning 
+        dist_off = dist_off_fill[idx_one + 2:]
+        u_off = u_off_fill[idx_one + 2:]
+        v_off = v_off_fill[idx_one + 2:]
+        water_depth_off_fill_trim = water_depth_off_fill[idx_one + 2:]
+
+    # Replace rest of the filled values with masks (for preserving masked elements in the array)
+    water_depth_off = np.ma.masked_equal(water_depth_off_fill_trim, -9999)
+
+    #--- Detrend data record ---# 
+    u_on_dt = detrend(u_on) - np.ma.mean(u_on)
+    v_on_dt = detrend(v_on) - np.ma.mean(v_on)
+    u_off_dt = detrend(u_off) - np.ma.mean(u_off)
+    v_off_dt = detrend(v_off) - np.ma.mean(v_off)
+
+    #--- Compute autocorrelation function ---#  
+
+    # Set parameters
+    window_on, window_off = len(u_on_dt), len(u_off_dt)
+    lag_on, lag_off = len(u_on_dt), len(u_off_dt)
+    task = 'full'
+
+    # Define complex variable 
+    z_on = u_on_dt + 1j*v_on_dt
+    z_off = u_off_dt + 1j*v_off_dt
+    
+    # Compute autocorrelation function
+    autocorr_on, _, _, _, _, _ = compute_complex_autocorr(z_on, window_on, lag_on, task, estimator)
+    autocorr_off, _, _, _, _, _ = compute_complex_autocorr(z_off, window_off, lag_off, task, estimator)
+
+    # Compute decorrelation time scale 
+    _, _, tau_re_on, tau_im_on = decor_scale_complex(z_on, L, estimator)
+    _, _, tau_re_off, tau_im_off = decor_scale_complex(z_off, L, estimator)
+
+    return autocorr_on, autocorr_off, tau_re_on, tau_im_on, tau_re_off, tau_im_off, dist_on, dist_off
+
