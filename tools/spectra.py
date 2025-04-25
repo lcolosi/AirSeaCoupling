@@ -273,3 +273,136 @@ def spectrum1D_frequency_nonwelch(data, dt, units):
     
     return psd, f
 
+
+#--- 1D Power Spectrum with the Welch Method ---# 
+def spectrum1D_frequency(data, dt, M, units):
+
+    """
+    Function for computing the 1D power density spectrum with the Welch method.
+    This function is written notationally for time series, but can be applied to spatial data.
+    The 1D frequency spectrum is computed by Hanning windowing segments of the data array with 50% overlap.
+    
+    Parameters
+    ----------
+    data : Time or spatial data series. Data must be evenly spaced (NaNs must be interpolated).
+    dt : Time or spatial interval between measurements.
+    M : Number of windows.
+    units : 'Hz' (cyclical frequency) or 'rad/s' (radian frequency).
+    
+    Returns
+    -------
+    psd : Normalized power spectral density function.
+    f : Frequency in units specified by units variable.
+    CI : 95% confidence interval.
+    variance : Dictionary containing the variance in the time and frequency domains.
+    """
+
+    # Import libraries
+    import numpy as np
+    from spectra import spectral_uncer
+    from scipy.signal import hann, detrend
+
+    ###########################################################################
+    ## STEP #1 - Set fundamental parameters for computing spectrum
+    ###########################################################################
+
+    N = len(data)                 # Number of data points of entire time series
+    p = N // M                    # Number of data points within a window
+
+    # Compute frequency resolution
+    if units == 'Hz':
+        df = 1 / (p * dt)
+    elif units == 'rad/s':
+        df = 2 * np.pi / (p * dt)
+
+    # Compute number of positive frequencies
+    if p % 2 == 0:
+        L = p // 2 + 1
+    else:
+        L = (p - 1) // 2
+
+    # Compute the period of the fundamental frequency (lowest frequency)
+    T = p * dt
+
+    # Compute frequency vector (units: Hz or rad/s)
+    if p % 2 == 0:
+        if units == 'Hz':
+            f = (1 / T) * np.arange(0, p // 2 + 1)
+        elif units == 'rad/s':
+            f = (2 * np.pi / T) * np.arange(0, p // 2 + 1)
+    else:
+        if units == 'Hz':
+            f = (1 / T) * np.arange(0, (p - 1) // 2)
+        elif units == 'rad/s':
+            f = (2 * np.pi / T) * np.arange(0, (p - 1) // 2)
+
+    ###########################################################################
+    ## STEP #2 - Segment data with 50% overlap
+    ###########################################################################
+
+    nseg = M + M - 1              # Compute number of segments including 50% overlap
+
+    # Initialize array for splitting time series into windows with 50% overlap
+    data_seg_n = data[:M*p].reshape((p, M), order='F')  # Segment original data set
+
+    data_seg_50 = []
+    for iseg in range(M - 1):
+        ind_i = int(p * iseg + (p / 2))
+        ind_f = int(ind_i + p)
+        if ind_f <= len(data):
+            data_seg_50.append(data[ind_i:ind_f])
+
+    if data_seg_50:
+        data_seg_50 = np.stack(data_seg_50, axis=1)
+        data_seg_n = np.concatenate((data_seg_n, data_seg_50), axis=1)
+
+    ###########################################################################
+    ## STEP #3 - Remove linear trend for each segment and apply hanning window
+    ###########################################################################
+
+    # Obtain a hanning window:
+    window = hann(p) * np.sqrt(p / np.sum(hann(p)**2))
+
+    # Preallocate windowed detrended segmented data array
+    data_seg_w = np.zeros_like(data_seg_n)
+
+    for iseg in range(data_seg_n.shape[1]):
+        data_seg_w[:, iseg] = detrend(data_seg_n[:, iseg]) * window
+
+    ###########################################################################
+    ## STEP #4 - Compute mean 1D frequency spectrum
+    ###########################################################################
+
+    spec_sum = np.zeros(p)                 # Preallocate spectrum summation array
+    cn = np.zeros(p)                       # Preallocate counter
+    variance = {'time': np.zeros(nseg)}   # Preallocate variance in time domain
+
+    for iseg in range(nseg):
+        fft_data_seg = np.fft.fft(data_seg_w[:, iseg])          # Fourier transform data
+        amp = np.abs(fft_data_seg)**2                           # Compute amplitudes
+        amp_norm = amp / (p**2) / df                            # Normalize amplitudes
+
+        variance['time'][iseg] = np.var(data_seg_w[:, iseg])    # Variance in time domain
+
+        spec_sum += amp_norm                                    # Sum spectrum
+        cn += 1                                                 # Update counter
+
+    m_spec = spec_sum / cn                                      # Compute mean spectrum
+    psd = m_spec[:L]                                            # Grab positive frequencies
+
+    # Double the amplitude for positive frequencies to conserve variance
+    if N % 2 == 0:
+        psd[1:-1] *= 2
+    else:
+        psd[1:] *= 2
+
+    # Compute the variance in frequency space
+    variance['freq'] = np.sum(psd * df)
+
+    # Compute 95% confidence interval
+    CI = spectral_uncer(M, 0.05, psd)
+
+    return psd, f, CI, variance
+
+
+
