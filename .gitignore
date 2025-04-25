@@ -16,4 +16,5 @@ docs/
 # Miscellaneous 
 .python-version
 src/__pycache__/
+tools/__pycache__/
 
