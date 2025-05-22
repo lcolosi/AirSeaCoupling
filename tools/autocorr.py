@@ -17,6 +17,9 @@ def compute_autocorr(data, x, lag, bias, norm = 0):
             1) Detrend to remove any signal that is undesirable in the autocovariance function.
             2) Missing data gaps are filled with NaN values to ensure a continuous time series.
             3) Flagged data should be replaced with NaN values.
+
+        x : array 
+            Time or spatial vector for data record. 
             
         lag : int
             The desired number of lags for computing the correlation. The specified amount of lags is dependent

@@ -63,10 +63,6 @@ def spectral_uncer(N, alpha, psd, estimator, M = []):
 
 
 
-
-
-
-
 #--- 1D Power Spectrum from the Autocovariance function ---# 
 def spectra_autocov(autocov_pos, autocov_neg, M, dt, units): 
     
@@ -400,7 +396,7 @@ def spectrum1D_frequency(data, dt, M, units):
     variance['freq'] = np.sum(psd * df)
 
     # Compute 95% confidence interval
-    CI = spectral_uncer(M, 0.05, psd)
+    _, CI, _ = spectral_uncer(M, 0.05, psd, 'data')
 
     return psd, f, CI, variance
 

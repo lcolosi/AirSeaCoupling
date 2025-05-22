@@ -23,7 +23,8 @@ def compute_pdf_1D(x,edges):
         pdf : array-like
             Probability density function defined on the X,Y-grid. Normalization is N*bin_area 
             where N is the total number of counts.
-
+        bin_centers: array-like
+            An array of the center of each bin. 
 
         Libraries necessary to run function
         -----------------------------------
@@ -38,13 +39,16 @@ def compute_pdf_1D(x,edges):
     counts, _ = np.histogram(x, edges, density=False)
     #pdf = np.histogram(x, edges, density=True) # This should give us the same result as below
 
-    # Compute bin width and bin area 
+    # Compute bin width  
     bin_width = np.unique(np.diff(edges))
 
     # Normalize counts by the total number of counts and bin area 
     pdf = counts / (np.sum(counts) * bin_width)
 
-    return counts, pdf
+    # Calculate bin centers from edges
+    bin_centers = np.array([(edges[i] + edges[i+1]) / 2 for i in range(len(edges)-1)])
+
+    return counts, pdf, bin_centers
 
 #--- 2D Probability Density Function ---# 
 def compute_pdf_2D(x,y,X,Y):
