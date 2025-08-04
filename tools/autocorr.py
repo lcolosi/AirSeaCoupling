@@ -2,6 +2,183 @@
 ## Luke Colosi | lcolosi@ucsd.edu 
 
 #--- Autocorrelation and Autocovariance Function ---# 
+def compute_autocorr_optimize(data, x, lag, bias, norm = 0):
+
+    """
+    rho_pos, rho_neg, R_pos, R_neg, x_ref_pos, x_ref_neg = compute_autocorr(data, x, lag, task, bias, norm = 0)
+
+    Function for computing the autocovariance and autocorrelation 
+    functions for positive and negative lag.
+    
+        Parameters
+        ----------
+        data : array
+            Time or spatial series of data. This data must be preprocessed in the following ways:
+            1) Detrend to remove any signal that is undesirable in the autocovariance function.
+            2) Missing data gaps are filled with NaN values to ensure a continuous time series.
+            3) Flagged data should be replaced with NaN values.
+
+        x : array 
+            Time or spatial vector for data record. 
+            
+        lag : int
+            The desired number of lags for computing the correlation. The specified amount of lags is dependent
+            on the length of the time series. You want to set the amount of lags to a value where the 
+            correlation coefficent is for the proper amount of iterations along to fixed time series.
+            Ex: lag_dt = len(data) (compute correlation coefficient at lag decreasing by one measurement at a time).
+            
+        bias : str
+            Specifies whether the covariance is biased or unbiased. The unbiased estimate is normalized by
+            1/n-m whereas the biased estimate is normalized by 1/n where n = total number of data points in time
+            series and m is the lag time from 0 lag. Furthermore, specifies whether the correlation coefficent is biased 
+            or unbaised using the same normalizations in numerator (unbiased (normalized by 1/n-m) or biased
+            (normalized by 1/n)) and the normalization 1/n for both cases in the demominator. 
+            Options: 'biased' or 'unbiased'.
+
+        norm : int
+            Specifies which lagged covariance you want to normalize the autocovariance function by. The normal convention
+            is to normalize it by the variance of the data record (the zeroth lag). However in the case where the noise in the
+            measurements is causing a large drop in the autocorrelation from the zeroth lag to the first lag (introducing 
+            a decorrelation signal different from the decorrelation from the natural variability of the system), normalizing the
+            autocovariance function by the first lag will provide a more accurate decorrelation scale. Options includes 0 or 1 
+            corresponds to the zero and first lag respectively. Default value: norm = 0. 
+            
+        Returns
+        -------
+        rho_pos : array
+            Positive lag autocorrelation function.
+            
+        rho_neg : array
+            Negative lag autocorrelation function.
+            
+        R_pos : array
+            Positive lag autocovariance function.
+            
+        R_neg : array
+            Negative lag autocovariance function.
+
+        x_ref_pos : array
+            Lag variable for positive lag autocorrelation or autocovariance functions. 
+
+        x_ref_neg : array 
+            Lag variable for positive lag autocorrelation or autocovariance functions. 
+
+        Libraries necessary to run function
+        -----------------------------------
+        import numpy as np 
+
+    """
+
+    # Import libraries 
+    import numpy as np
+
+    # Convert masked array to float array with NaNs for masked values (working with nan filled arrays is much faster than masked arrays)
+    if np.ma.isMaskedArray(data):
+        data_filled = data.filled(np.nan)
+    else:
+        data_filled = data
+
+    # Choose interval length n which the correlation coefficient will be computed (Counting masked elements)
+    N = len(data_filled)
+
+    # Remove mean ignoring NaNs once for all data
+    data_mean     = np.nanmean(data_filled)
+    data_demeaned = data_filled - data_mean
+
+    # Initialize autocovariance and autocorrelation arrays
+    R         = np.zeros(lag)   # Autocovariance
+    rho       = np.zeros(lag)   # Autocorrelation 
+
+    # Compute normalization factor Rnorm used to scale autocovariances into autocorrelations
+    if norm == 0:
+
+        # Use variance (lag-0 autocovariance) as normalization
+        valid_mask = ~np.isnan(data_demeaned)                # Identify valid (non-NaN) data points
+        count_valid = np.sum(valid_mask)                     # Count of valid points
+        
+        # Compute variance ignoring NaNs by summing squared deviations and dividing by valid count
+        Rnorm = np.nansum(data_demeaned * data_demeaned) / count_valid
+
+    elif norm == 1:
+
+        # Use lag-1 autocovariance as normalization
+        valid_mask = ~np.isnan(data_demeaned[:-1]) & ~np.isnan(data_demeaned[1:]) # Identify valid (non-NaN) data points (ignoring the zero lag)
+        count_valid = np.sum(valid_mask)                                          # Count valid pairs at lag 1
+        
+        # Compute lag-1 autocovariance ignoring NaNs by summing product of pairs divided by valid count
+        Rnorm = np.nansum(data_demeaned[:-1][valid_mask] * data_demeaned[1:][valid_mask]) / count_valid
+    else:
+        raise ValueError("norm must be 0 or 1")
+
+    # Loop through each lag interval to compute the correlation and covariance  
+    for k in range(lag):
+
+        # Create overlapping segments with lag k
+        seg1 = data_demeaned[:N - k]
+        seg2 = data_demeaned[k:]
+
+        # Create mask for valid (non-NaN) pairs
+        valid_mask = ~np.isnan(seg1) & ~np.isnan(seg2)
+        n_eff = np.sum(valid_mask)
+        n = len(seg1)
+
+        if n_eff == 0:
+
+            # No valid data pairs at this lag; assign NaN and skip computation
+            R[k] = np.nan
+            rho[k] = np.nan
+            continue
+
+        # Compute sum of products over valid pairs at lag k, ignoring NaNs
+        inner_product = np.nansum(seg1[valid_mask] * seg2[valid_mask])
+
+        # Compute the autocovariance function at lag k
+
+        #--- Unbiased ---# 
+        # Method: divide by number of valid pairs at this lag
+        if bias == 'unbiased':
+            R[k] = inner_product / n_eff
+
+        #--- Unbiased Tapered (Triangular taper) ---# 
+        # Method: same as unbiased estimate but also scale by ratio of available pairs to full length (triangular taper)
+        elif bias == 'unbiased_tapered':
+            R[k] = (inner_product / n_eff) * (n / N)
+
+        #--- Biased ---# 
+        # Method: divide by total length (fixed denominator)
+        elif bias == 'biased':
+            R[k] = inner_product / N
+
+        # Catch if an incorrect argument for the bias argument is given
+        else:
+            raise ValueError("bias must be 'biased', 'unbiased', or 'unbiased_tapered'")
+
+        # Compute the autocorrelation function at lag k
+        rho[k] = R[k] / Rnorm
+
+
+    # Combine positive and negative lag arrays 
+
+    #--- Lag ---#  
+    x_ref_pos = x - x[0]
+    x_ref_neg = -1 * np.flip(x_ref_pos)[:-1]
+
+    #--- Autocovariance ---# 
+    R_pos = R
+    R_neg = np.flip(R)[:-1]
+
+    #--- Autocorrelation ---# 
+    if norm == 0:
+        rho_pos = rho
+        rho_neg = np.flip(rho)[:-1]
+    elif norm == 1:
+        # Set zero lag to 1 explicitly (normalize by first lag)
+        rho_pos = np.insert(rho[1:], 0, 1)
+        rho_neg = np.flip(rho)[:-1]
+
+    return rho_pos, rho_neg, R_pos, R_neg, x_ref_pos, x_ref_neg
+
+#--- Autocorrelation and Autocovariance Function ---# 
 def compute_autocorr(data, x, lag, bias, norm = 0):
 
     """
@@ -208,13 +385,144 @@ def compute_autocorr(data, x, lag, bias, norm = 0):
         rho_neg = np.flip(rho)[:-1]
     
     return rho_pos, rho_neg, R_pos, R_neg, x_ref_pos, x_ref_neg #, c_pairs_m, c_pairs_nm (ignoring this output)
-
+    
 
 
 
 
 
 #--- Decorrelation Scale Analysis ---%
+def compute_decor_scale_optimize(autocorr,x_ref,dx,bias,norm):
+
+    """
+    Computes the decorrelation scale as an intergral time scale from the positively lag autocorrelation function.  
+
+    Parameters
+    ----------
+    autocorr : array
+            Positive lag autocorrelation function. 
+
+    x_ref : array 
+            Lag time or distance independent variable. 
+
+    dx : float 
+            The distance between data points in physical space. 
+
+    bias : str
+            Specifies whether the covariance is biased or unbiased. The unbiased estimate is normalized by
+            1/n-m whereas the biased estimate is normalized by 1/n where n = total number of data points in time
+            series and m is the lag time from 0 lag. Options: 'biased' or 'unbiased'.
+
+    norm : int
+            Specifies which lagged covariance you want to normalize the autocovariance function by. The normal convention
+            is to normalize it by the variance of the data record (the zeroth lag). However in the case where the noise in the
+            measurements is causing a large drop in the autocorrelation from the zeroth lag to the first lag (introducing 
+            a decorrelation signal different from the decorrelation from the natural variability of the system), normalizing the
+            autocovariance function by the first lag will provide a more accurate decorrelation scale. Options includes 0 or 1 
+            corresponds to the zero and first lag respectively. Default value: norm = 0. 
+
+    Returns
+    -------
+    scale : float 
+        The integral time scale estimate of the decorrelation scale. 
+
+    Libraries necessary to run function
+    -----------------------------------
+    import numpy as np 
+    from scipy.integrate import trapezoid
+
+    """
+
+    # Import libraries 
+    import numpy as np
+    from scipy.integrate import cumulative_trapezoid
+
+    # Set the length of data series and data interval
+    N = len(autocorr)      # length of one-sided autocorrelation function (and number of samples in data record)
+    R = N * dx                 # length of the data series (units of time or space)
+    
+    # Normalize by the zeroth lag 
+    if norm == 0: 
+
+        # Set the positive and negative lagged autocovariance functions and concatinate
+        autocorr_full = np.concatenate((np.flip(autocorr[1:]), autocorr))
+        x_ref_full    = np.concatenate((-1 * np.flip(x_ref[1:]), x_ref))
+
+        # Precompute all possible trapezoidal integrals over the full symmetric autocorrelation function
+        if bias == 'unbiased':
+            
+            # Compute triangular weights for unbiased estimator:
+            # Each lag value is weighted by (1 - |lag| / R), which accounts for the decreasing number of data pairs at larger lags
+            weights = 1 - (np.abs(x_ref_full) / R)
+            
+            # Multiply the symmetric autocorrelation function by the weights
+            # This creates the weighted integrand to be used in integration
+            integrand = weights * autocorr_full
+
+        else:
+            # If using biased estimator, do not apply weights; just use raw autocorrelation values
+            integrand = autocorr_full
+
+        # Compute the cumulative integral of the (possibly weighted) autocorrelation function
+        # The result is a 1D array where each entry gives the integral from the first lag up to that point in x_ref_full
+        # Setting initial=0 ensures the integral starts at zero
+        integral_full = cumulative_trapezoid(integrand, x_ref_full, initial=0)
+
+        # Determine the index corresponding to zero lag in the full symmetric autocorrelation array
+        center = N - 1  # Since autocorr_full has length 2N - 1, the center index is at N-1
+
+        # Initialize an array to hold decorrelation scale estimates for each lag i
+        scale_N = np.zeros(N)
+
+        # Loop over lags from 1 to N-1 to compute integral estimates over symmetric windows
+        for i in range(1, N):
+
+            # Calculate the start index of the symmetric window for negative lag (-i)
+            start = center - i
+
+            # Calculate the end index (one past the positive lag +i) for slicing
+            end = center + i + 1
+
+            # Use cumulative trapezoidal integral differences to compute integral over [-i, +i]
+            scale_N[i] = integral_full[end - 1] - integral_full[start]
+
+        # Select the maximum value from all computed scales as a conservative estimate of the decorrelation scale
+        scale = np.nanmax(scale_N)
+
+    #--- Normalize by the first lag ---#
+    if norm == 1:
+
+        # For the positive lag autocorrelation function only, assuming symmetry around lag zero,
+        # so the integral over negative lags can be accounted for by doubling the positive lag integral
+
+        if bias == 'unbiased':
+
+            # Compute triangular weights to correct for bias (fewer data pairs at larger lags)
+            # weights linearly decrease from 1 at lag zero to 0 at maximum lag R
+            weights = 1 - (x_ref / R)
+
+            # Apply the weights to the autocorrelation values to get the weighted integrand
+            integrand = weights * autocorr
+        else:
+
+            # If biased, no weighting; use the raw autocorrelation values
+            integrand = autocorr
+
+        # Compute the cumulative integral (trapezoidal rule) of the integrand over positive lags
+        # integral_pos[k] holds the integral from lag zero up to lag x_ref[k]
+        integral_pos = cumulative_trapezoid(integrand, x_ref, initial=0)
+
+        # Initialize array to hold decorrelation scale estimates for each lag
+        scale_N = np.zeros(N)
+
+        # For lags greater than zero, scale the integral by 2 to account for symmetric negative lags
+        scale_N[1:] = 2 * integral_pos[1:]
+
+        # Take the maximum integral value as the conservative estimate of the decorrelation scale
+        scale = np.nanmax(scale_N)
+
+    return scale 
+
 def compute_decor_scale(autocorr,x_ref,dx,bias,norm):
 
     """
@@ -362,7 +670,6 @@ def compute_decor_scale(autocorr,x_ref,dx,bias,norm):
         scale = np.nanmax(scale_N)
 
     return scale 
-
 
 
 

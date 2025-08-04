@@ -409,3 +409,110 @@ def amp_phase_unc(x_data, x_data_sigma):
 
     return sigma_amp, sigma_phase
 
+
+########### Compute Plane Least square fit ###########
+def plane_lsf(data, xcor, ycor, parameters, sigma=None):
+
+    """
+    Function for computing a plane fit to 2D data of order n.
+
+    Parameters
+    ----------
+    data : 2D array
+        2-dimensional data in xy-space. May contain NaN values.
+    xcor : 2D array
+        Matrix of x-axis coordinate positions (same shape as data).
+    ycor : 2D array
+        Matrix of y-axis coordinate positions (same shape as data).
+    parameters : int
+        Order of the polynomial plane (0 to 3).
+    sigma : float or None
+        Measurement uncertainty. Only scalar uncertainty is supported.
+
+    Returns
+    -------
+    plane_fit : 2D array
+        Plane fit of data (same shape as input data).
+    x_data : 1D array
+        Coefficients of the least squares model.
+    x_data_sigma : 1D array or empty list
+        Standard deviation of the model coefficients.
+    L2_norm : float
+        L2 norm of the misfit between the model and data.
+    """
+
+    import numpy as np
+
+    # Set x and y dimensions of the data
+    nx, ny = data.shape
+
+    # Find indices where NaN values exist
+    idx_nans = np.isnan(data)
+
+    # Remove NaN values from data and coordinates
+    data_n = data[~idx_nans]
+    xcor_n = xcor[~idx_nans]
+    ycor_n = ycor[~idx_nans]
+
+    # Flatten data and coordinates into 1D vectors
+    data_flat = data_n.ravel()
+    x_flat = xcor_n.ravel()
+    y_flat = ycor_n.ravel()
+
+    # Construct design matrix A based on polynomial order
+    if parameters == 0:
+        A = np.ones((len(data_flat), 1))
+
+    elif parameters == 1:
+        A = np.column_stack((np.ones(len(data_flat)), x_flat, y_flat))
+
+    elif parameters == 2:
+        A = np.column_stack((np.ones(len(data_flat)), x_flat, y_flat,
+                             x_flat**2, x_flat*y_flat, y_flat**2))
+
+    elif parameters == 3:
+        A = np.column_stack((np.ones(len(data_flat)), x_flat, y_flat,
+                             x_flat**2, x_flat*y_flat, y_flat**2,
+                             x_flat**3, x_flat**2*y_flat, x_flat*y_flat**2, y_flat**3))
+
+    # Solve least squares problem using stable method
+    x_data, _, _, _ = np.linalg.lstsq(A, data_flat, rcond=None)
+
+    # Compute plane fit based on polynomial order
+    if parameters == 0:
+        hfit = x_data[0] * np.ones(nx * ny)
+
+    elif parameters == 1:
+        hfit = (x_data[0] + x_data[1] * xcor.ravel() + x_data[2] * ycor.ravel())
+
+    elif parameters == 2:
+        hfit = (x_data[0] + x_data[1] * xcor.ravel() + x_data[2] * ycor.ravel()
+                + x_data[3] * xcor.ravel()**2 + x_data[4] * xcor.ravel() * ycor.ravel()
+                + x_data[5] * ycor.ravel()**2)
+
+    elif parameters == 3:
+        hfit = (x_data[0] + x_data[1] * xcor.ravel() + x_data[2] * ycor.ravel()
+                + x_data[3] * xcor.ravel()**2 + x_data[4] * xcor.ravel() * ycor.ravel()
+                + x_data[5] * ycor.ravel()**2 + x_data[6] * xcor.ravel()**3
+                + x_data[7] * xcor.ravel()**2 * ycor.ravel()
+                + x_data[8] * xcor.ravel() * ycor.ravel()**2 + x_data[9] * ycor.ravel()**3)
+
+    # Reshape model fit back into original xy shape
+    plane_fit = hfit.reshape((nx, ny))
+
+    # Compute misfit between model and data
+    e = A @ x_data - data_flat
+
+    # Compute L2 norm of residuals
+    L2_norm = np.linalg.norm(e)
+
+    # Compute uncertainty in model parameters if sigma is provided
+    if sigma is not None:
+        ATA_inv = np.linalg.inv(A.T @ A)
+        C = sigma**2 * ATA_inv
+        x_data_sigma = np.sqrt(np.diag(C))
+    else:
+        x_data_sigma = []
+
+    return plane_fit, x_data, x_data_sigma, L2_norm
+
