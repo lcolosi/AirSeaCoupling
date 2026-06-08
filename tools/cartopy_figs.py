@@ -121,7 +121,7 @@ def set_grid_ticks(
 
     # Set grid lines
     if grid == True:
-        ax.grid(linewidth=2, color=color, alpha=0.3, linestyle="--")
+        ax.grid(linewidth=1, color=color, alpha=0.3, linestyle="--")
 
     return
 
@@ -187,7 +187,7 @@ def grid_lines_rc(
 
 ########### Colorbar Function ###########
 def set_cbar(
-    cs, cax, fig, orientation, extend, cbar_label, nbins, fontsize, cbar_ticks, task
+    cs, cax, fig, orientation, extend, cbar_label, nbins, fontsize, cbar_ticks, task, option_invert = 0
 ):
 
     """
@@ -270,6 +270,10 @@ def set_cbar(
 
     # set the fontsize of colorbar tickmarks
     cbar.ax.tick_params(labelsize=fontsize)
+
+    # invert the colorbar
+    if option_invert == 1:
+        cbar.ax.invert_yaxis()
 
     return
 

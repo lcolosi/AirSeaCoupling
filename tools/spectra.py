@@ -62,6 +62,7 @@ def spectral_uncer(N, alpha, psd, estimator, M = []):
     return error, CI, error_ratio
 
 
+#--- Spectral Slope ---# 
 def spectral_slope(f, E, fmin, fmax):
     """
     Function for computing the spectral slope in log space of a power spectral
@@ -100,7 +101,7 @@ def spectral_slope(f, E, fmin, fmax):
     
     # Preform least squares fit (linear regression in log-log space)
     A = np.vstack([np.ones_like(fi), fi]).T
-    coef, residuals, _, _ = np.linalg.lstsq(A, Ei, rcond=None)
+    coef, _, _, _ = np.linalg.lstsq(A, Ei, rcond=None)
 
     # Set slope from solution of LSF
     m = coef[1]
@@ -360,7 +361,7 @@ def spectrum1D_frequency(data, dt, M, units):
     psd : Normalized power spectral density function.
     f : Frequency in units specified by units variable.
     CI : 95% confidence interval.
-    variance : Dictionary containing the variance in the time and frequency domains.
+    variance : Array containing the variance in the time and frequency domains such that variance = np.array([time_domain, frequency_domain])
     """
 
     # Import libraries
@@ -372,7 +373,6 @@ def spectrum1D_frequency(data, dt, M, units):
     ###########################################################################
     ## STEP #1 - Set fundamental parameters for computing spectrum
     ###########################################################################
-
     N = len(data)                 # Number of data points of entire time series
     p = N // M                    # Number of data points within a window
 
@@ -412,14 +412,20 @@ def spectrum1D_frequency(data, dt, M, units):
 
     # Initialize array for splitting time series into windows with 50% overlap
     data_seg_n = data[:M*p].reshape((p, M), order='F')  # Segment original data set
-
     data_seg_50 = []
+
+    # Loop through segments
     for iseg in range(M - 1):
+
+        # Obtain segment indicies
         ind_i = int(p * iseg + (p / 2))
         ind_f = int(ind_i + p)
+
+        # Index data and append
         if ind_f <= len(data):
             data_seg_50.append(data[ind_i:ind_f])
 
+    # Concatinate data segements
     if data_seg_50:
         data_seg_50 = np.stack(data_seg_50, axis=1)
         data_seg_n = np.concatenate((data_seg_n, data_seg_50), axis=1)
@@ -428,35 +434,56 @@ def spectrum1D_frequency(data, dt, M, units):
     ## STEP #3 - Remove linear trend for each segment and apply hanning window
     ###########################################################################
 
-    # Obtain a hanning window:
+    # Compute a normalized hanning window
     window = hann(p) * np.sqrt(p / np.sum(hann(p)**2))
 
     # Preallocate windowed detrended segmented data array
     data_seg_w = np.zeros_like(data_seg_n)
 
-    for iseg in range(data_seg_n.shape[1]):
+    # Loop through segments
+    for iseg in range(nseg):
+
+        # Detrend and apply window
         data_seg_w[:, iseg] = detrend(data_seg_n[:, iseg]) * window
 
     ###########################################################################
     ## STEP #4 - Compute mean 1D frequency spectrum
     ###########################################################################
 
-    spec_sum = np.zeros(p)                 # Preallocate spectrum summation array
-    cn = np.zeros(p)                       # Preallocate counter
-    variance = {'time': np.zeros(nseg)}   # Preallocate variance in time domain
+    # Preallocate arrays
+    spec_sum = np.zeros(p)                 # Sspectrum summation array
+    cn = np.zeros(p)                       # Counter
+    variance = np.zeros(2)                 # Variance in time and frequency domain
 
+    # Loop through segments
     for iseg in range(nseg):
-        fft_data_seg = np.fft.fft(data_seg_w[:, iseg])          # Fourier transform data
-        amp = np.abs(fft_data_seg)**2                           # Compute amplitudes
-        amp_norm = amp / (p**2) / df                            # Normalize amplitudes
 
-        variance['time'][iseg] = np.var(data_seg_w[:, iseg])    # Variance in time domain
+        # Fourier transform data
+        fft_data_seg = np.fft.fft(data_seg_w[:, iseg])         
 
-        spec_sum += amp_norm                                    # Sum spectrum
-        cn += 1                                                 # Update counter
+        # Compute amplitudes
+        amp = np.abs(fft_data_seg)**2                        
 
-    m_spec = spec_sum / cn                                      # Compute mean spectrum
-    psd = m_spec[:L]                                            # Grab positive frequencies
+        # Normalize amplitudes
+        amp_norm = amp / (p**2) / df                            
+
+        # Compute variance in the time domain for each segment
+        var_seg_time = np.var(data_seg_w[:, iseg])    
+
+        # Sum spectrum 
+        spec_sum += amp_norm                                   
+
+        # Reinitialize counter
+        cn += 1                                                 
+
+    # Compute the mean spectrum 
+    m_spec = spec_sum / cn        
+
+    # Compute the mean variance across segments in the time domain
+    variance[0] = np.mean(var_seg_time)                               
+
+    # Grab positive frequencies
+    psd = m_spec[:L]                                            
 
     # Double the amplitude for positive frequencies to conserve variance
     if N % 2 == 0:
@@ -465,7 +492,7 @@ def spectrum1D_frequency(data, dt, M, units):
         psd[1:] *= 2
 
     # Compute the variance in frequency space
-    variance['freq'] = np.sum(psd * df)
+    variance[1] = np.trapezoid(psd, f)
 
     # Compute 95% confidence interval
     _, CI, _ = spectral_uncer(M, 0.05, psd, 'data')
@@ -746,7 +773,6 @@ def spectrum2D_wavenumber(data, x, y, dx, dy, Mx, My):
     return m_spec, kx, ky, m_spec_pol, k, theta, spec_omni
 
 
-
 #--- Compute the 2D Wavenumber Spectrum with padding and no Welch method ---# 
 def spectrum2D_wavenumber_nonwelch_pad(data, x, y, dx, dy, frac):
     """
@@ -1021,3 +1047,467 @@ def spectrum2D_wavenumber_frequency(data, t, x, dt, dx, Mt, Mx):
     m_spec = spec_sum / nseg
 
     return m_spec, kx, f
+
+
+#--- Compute the Rotary Spectrum ---# 
+def rotary_spectrum_welch(u, v, dt, M, units='Hz'):
+    """
+    Compute clockwise (CW) and counter-clockwise (CCW) rotary power spectra
+    using the Welch method, consistent with your 1D PSD implementation.
+
+    Parameters
+    ----------
+    u, v : 1D arrays
+        Horizontal velocity components (same length, evenly spaced).
+    dt : float
+        Sampling interval (seconds if using 'cpd').
+    M : int
+        Number of non-overlapping windows. 
+        The function automatically adds 50% overlapped windows.
+    units : {'Hz','rad/s','cpd'}
+        Output frequency units.
+
+    Returns
+    -------
+    psd_plus : CCW rotary spectrum (positive rotary component)
+    psd_minus : CW rotary spectrum (negative rotary component)
+    f : frequency vector in requested units
+    CI_plus, CI_minus : 95% confidence intervals
+    variance : dict of time-domain and frequency-domain variances
+    """
+
+    import numpy as np
+    from scipy.signal.windows import hann
+    from scipy.signal import detrend
+    from spectra import spectral_uncer
+
+    # Convert to numpy arrays and check consistency
+    u = np.asarray(u)
+    v = np.asarray(v)
+    if u.shape != v.shape:
+        raise ValueError("u and v must be the same length.")
+
+    # ---------------------------------------------------------------------
+    # STEP 1 — Compute fundamental parameters
+    # ---------------------------------------------------------------------
+    N = len(u)          # total number of samples
+    p = N // M          # samples per segment (equal length windows)
+    if p < 2:
+        raise ValueError("Segment length p = N//M must be >= 2.")
+
+    # df_base is the underlying frequency spacing (in Hz for Hz/cpd modes)
+    if units in ('Hz', 'cpd'):
+        df_base = 1.0 / (p * dt)       # Hz
+    elif units == 'rad/s':
+        df_base = 2*np.pi / (p*dt)     # rad/s
+    else:
+        raise ValueError("units must be 'Hz','rad/s','cpd'.")
+
+    # Number of positive frequencies to keep
+    L = p//2 + 1 if (p % 2 == 0) else (p - 1)//2
+
+    # Base index vector for frequencies (0,1,2,...,L-1)
+    base = np.arange(0, L)
+
+    # Internal frequency vector (in Hz or rad/s) before optional conversion
+    if units in ('Hz', 'cpd'):
+        f = base / (p * dt)            # cycles per second (Hz)
+        df_for_norm = 1.0 / (p * dt)   # frequency resolution used in normalization (Hz)
+    else:
+        f = (2*np.pi/(p*dt)) * base    # rad/s
+        df_for_norm = 2*np.pi/(p*dt)
+
+    # ---------------------------------------------------------------------
+    # STEP 2 — Segment u and v into overlapping windows
+    # ---------------------------------------------------------------------
+    def _segment(data, M, p):
+        """
+        Segment time series into:
+        - M non-overlapping windows (length p)
+        - (M-1) windows with 50% overlap
+        Returns array of shape (p, nseg).
+        """
+        # First: M non-overlapping blocks (column-major reshape)
+        seg_main = data[:M*p].reshape((p, M), order='F')
+
+        # Second: 50% overlapped segments
+        seg_overlap = []
+        for iseg in range(M - 1):
+            start = int(p*iseg + p/2)
+            end   = start + p
+            if end <= len(data):
+                seg_overlap.append(data[start:end])
+
+        # Stack together
+        if seg_overlap:
+            return np.concatenate((seg_main,
+                                   np.stack(seg_overlap, axis=1)), axis=1)
+        else:
+            return seg_main
+
+    # Segment both components
+    u_seg = _segment(u, M, p)
+    v_seg = _segment(v, M, p)
+    nseg = u_seg.shape[1]     # total number of segments (~2M−1)
+
+    # ---------------------------------------------------------------------
+    # STEP 3 — Detrend each segment and apply a normalized Hanning window
+    # ---------------------------------------------------------------------
+    # Normalized Hanning: ensures sum(window^2) = p so variance is preserved
+    window = hann(p) * np.sqrt(p / np.sum(hann(p)**2))
+
+    # Apply detrend + window (vectorized over segments)
+    u_w = detrend(u_seg, axis=0) * window[:, None]
+    v_w = detrend(v_seg, axis=0) * window[:, None]
+
+    # ---------------------------------------------------------------------
+    # STEP 4 — Compute rotary FFT per segment and accumulate spectra
+    # ---------------------------------------------------------------------
+    psd_plus_sum  = np.zeros(L)    # CCW energy accumulator
+    psd_minus_sum = np.zeros(L)    # CW energy accumulator
+    var_time = np.zeros(nseg)      # time-domain variance of each segment
+
+    for j in range(nseg):
+
+        # Form complex velocity: z = u + i v 
+        # (CCW rotation ↔ positive frequency, CW ↔ negative frequency)
+        z = u_w[:, j] + 1j * v_w[:, j]
+
+        # FFT for this segment
+        Z = np.fft.fft(z)
+
+        # Power spectrum (magnitude squared)
+        amp = np.abs(Z)**2
+
+        # Normalize to match your 1D spectrum normalization:
+        #   amp_norm = |FFT|^2 / (p^2) / df
+        # This ensures integral(PSD df) = variance of the windowed segment.
+        amp_norm = amp / (p**2) / df_for_norm
+
+        # Time-domain variance of windowed segment
+        var_time[j] = np.var(u_w[:, j]) + np.var(v_w[:, j])
+
+        # -------------------------
+        # CCW rotary component
+        # -------------------------
+        # Positive frequencies correspond to CCW rotation
+        plus_seg = amp_norm[:L].copy()
+
+        # -------------------------
+        # CW rotary component
+        # -------------------------
+        # Negative frequencies correspond to clockwise rotation.
+        # These appear in FFT indices p−k for k in 1...(L−1).
+        minus_seg = np.zeros(L)
+
+        if p % 2 == 0:
+            # even-length FFT → Nyquist exists at index p/2
+            minus_seg[0] = amp_norm[0]       # zero-freq: no rotation but symmetric
+            for k in range(1, L-1):
+                minus_seg[k] = amp_norm[p-k] # map negative freq indices
+            minus_seg[L-1] = amp_norm[L-1]   # Nyquist frequency (real, no rotation)
+        else:
+            # odd-length FFT (no Nyquist bin)
+            minus_seg[0] = amp_norm[0]
+            for k in range(1, L):
+                minus_seg[k] = amp_norm[p-k]
+
+        # Accumulate over all segments for Welch averaging
+        psd_plus_sum  += plus_seg
+        psd_minus_sum += minus_seg
+
+    # Welch-averaged rotary spectra
+    psd_plus  = psd_plus_sum  / nseg
+    psd_minus = psd_minus_sum / nseg
+
+    # ---------------------------------------------------------------------
+    # STEP 5 — Convert to CPD if requested (variance-preserving)
+    # ---------------------------------------------------------------------
+    variance = {}
+    variance['time'] = var_time
+
+    if units == 'cpd':
+        # Convert frequency from Hz → cycles per day
+        sec_per_day = 86400.0
+        f = f * sec_per_day
+
+        # Variance-preserving conversion:
+        #   S_cpd df_cpd = S_Hz df_Hz
+        #   df_cpd = df_Hz * 86400
+        #   → S_cpd = S_Hz / 86400
+        psd_plus  = psd_plus  / sec_per_day
+        psd_minus = psd_minus / sec_per_day
+
+        df_used = df_for_norm * sec_per_day   # df in cpd
+
+        # Compute variance from spectra for both channels
+        variance['freq_plus']  = np.sum(psd_plus  * df_used)
+        variance['freq_minus'] = np.sum(psd_minus * df_used)
+
+    else:
+        # No unit conversion needed
+        df_used = df_for_norm
+        variance['freq_plus']  = np.sum(psd_plus  * df_used)
+        variance['freq_minus'] = np.sum(psd_minus * df_used)
+
+    # ---------------------------------------------------------------------
+    # STEP 6 — 95% confidence intervals using your spectral_uncer() function
+    # ---------------------------------------------------------------------
+    _, CI_plus, _  = spectral_uncer(M, 0.05, psd_plus,  'data')
+    _, CI_minus, _ = spectral_uncer(M, 0.05, psd_minus, 'data')
+
+    return psd_plus, psd_minus, f, CI_plus, CI_minus, variance
+
+
+
+#--- Generate 1D data from a power law spectrum ---# 
+def generate_powerlaw_data(N=2**12, alpha=2.0, random_state=None, dt=1.0):
+    """
+    Generate a synthetic data record with a power-law spectrum S(f) ~ f^(-alpha).
+    Normalized PSD so that the variance of the time series matches Parseval's theorem.
+
+    Parameters
+    ----------
+    N : int
+        Length of the time series (preferably a power of 2 for FFT efficiency).
+    alpha : float
+        Spectral slope (e.g., alpha=0 white noise, alpha=1 pink noise, alpha=2 red noise).
+    random_state : int or None
+        Seed for reproducibility.
+    dt : float
+        Sampling interval (arbitrary units).
+
+    Returns
+    -------
+    t : ndarray
+        Time or spatial array (0..N-1).
+    x : ndarray
+        Generated data record.
+    f : ndarray
+        Frequencies corresponding to PSD (cycles per unit)
+    psd : ndarray
+        Power spectral density of the generated series.
+    """
+
+    # Import libraries
+    import numpy as np
+    from scipy.signal import detrend
+
+    #-----------------------------------------------------------------------
+    # STEP 1 - Set frequencies, amplitudes, and phases for Fourier Coefficients 
+    #-----------------------------------------------------------------------
+
+    # Create a new random number generator object for phases (for reproducable results)
+    rng = np.random.default_rng(random_state)
+
+    # Set frequencies for FFT (nonnegative with length N//2 + 1 from 0 to nyquist frequency)
+    freqs = np.fft.rfftfreq(N, d=dt)  # assume unit sampling interval
+
+    # Avoid divide-by-zero at f=0
+    freqs[0] = 1e-6  
+
+    # Power-law amplitude scaling 
+    amplitude = freqs**(-alpha / 2.0)
+
+    ###################
+    # Note
+    # ----
+    # We need scale the Fourier amplitudes so that when squared (for computing the power spectrum), 
+    # they follow the desired f^(-alpha) power law. Recall the power spectrum is square of the 
+    # Fourier coefficients
+    # 
+    # S(f) = |X(f)|^2
+    # 
+    # Therefore, in order for S(f) ~ f^(-alpha), we need: 
+    # 
+    # |X(f)|^2 = f^(-alpha)  ->  |X(f)| = (f^(-alpha))^1/2 = f^(-alpha/2)
+    ###################
+
+    # Generate random phases uniformly distributed [0, 2pi)
+    phases = rng.uniform(0, 2*np.pi, size=freqs.shape)
+
+    ###################
+    # Note
+    # ----
+    # The power spectrum S(f) tells us how much variance lives at each frequency but it does
+    # not tell us what the waveform looks like. To actually construct a time series, you need
+    # the complex Fourier coefficients: 
+    # 
+    # X(f) = |X(f)| e^(i phi(f)) = |X(f)| (cos(phi(f)) + i * sin(phi(f)))
+    # 
+    # where |X(f)| are the amplitudes of the Fourier coefficients and phi(f) are the phases. 
+    # The phases must be randomized to ensure that energy is spread out in time in a
+    # realistic, stochastic way. That is, to ensure create a statistically stationary time series
+    # that has no artificial coherence (e.g., if the phases were fixed at the same value, at 
+    # at the beginning of the record, there would be a perfectly aligned sum of sinusoids that
+    # might look like a standing wave). 
+    ###################
+
+    #-----------------------------------------------------------------------
+    # STEP 2 - Compute Fourier Coefficients and build spectrum 
+    #-----------------------------------------------------------------------
+
+    # Complex Fourier coefficients
+    fourier_coeffs = amplitude * np.exp(1j * phases)
+
+    # Enforce reality conditions
+    fourier_coeffs[0] = amplitude[0]               # DC component real
+    if N % 2 == 0:
+        fourier_coeffs[-1] = amplitude[-1]         # Nyquist real
+
+    #-----------------------------------------------------------------------
+    # STEP 3 - Compute data record
+    #-----------------------------------------------------------------------
+
+    # Generate time or space vector
+    t = np.arange(N)
+
+    # Inverse FFT to time or space domain
+    x = np.fft.irfft(fourier_coeffs, n=N)
+
+    # Normalize to unit variance and zero mean 
+    x = (x - np.mean(x)) / np.std(x)
+    
+    ###################
+    # Note
+    # ----
+    # We normalize to unit variance so the data record's realizations are comparable. 
+    # We can then rescale to whatever variance we need based on observations. 
+    ###################
+
+    #-----------------------------------------------------------------------
+    # STEP 4 - Compute Variance preserving PSD
+    #-----------------------------------------------------------------------
+
+    # Set spectral parameters
+    df = 1 / (N * dt)
+    L = N // 2 + 1 if N % 2 == 0 else (N + 1) // 2
+
+    # Detrend time series
+    x_dt = x - np.mean(x) #detrend(x)
+    
+    # Compute FFT of the time series
+    fft_data = np.fft.fft(x_dt) 
+    
+    # Take squared modulus of the Fourier coefficients
+    amp = np.abs(fft_data) ** 2
+    
+    # Grab positive frequencies for single-sided PSD
+    amp_pos = amp[:L]
+    
+    # Double the amplitude for positive frequencies to conserve variance
+    if N % 2 == 0:
+        amp_pos[1:-1] *= 2
+    else:
+        amp_pos[1:] *= 2
+    
+    # Normalize power spectral density
+    psd = amp_pos / (N**2 * df)
+
+    return t, x, freqs, psd
+
+
+#--- Compute spectral moments and higher order statistics ---# 
+def spectral_diagnostics(psd, f, f_cutoff=None):
+    """
+    Function for computing spectral moments, bandwidth, and entropy.
+    This acts as a diagnostic tool to connect PSD shape to decorrelation scales.
+    
+    Parameters
+    ----------
+    psd : Power spectral density array (from spectrum1D_frequency).
+    f : Frequency vector (from spectrum1D_frequency).
+    f_cutoff : Frequency to split 'low' (mesoscale) and 'high' (tidal) bands.
+    
+    Returns
+    -------
+    m : Array of moments [m0, m1, m2].
+    nu : Spectral bandwidth parameter (dimensionless).
+    skew : Spectral skewness (measures asymmetry of energy distribution).
+    entropy : Spectral entropy (measure of complexity).
+    fve : If f_cutoff is provided, returns fraction of low-freq and high-freq variance to the total variance.
+    """
+
+    # Import libraries
+    import numpy as np
+
+    ###########################################################################
+    ## STEP #1 - Compute global spectral moments (m0, m1, m2)
+    ###########################################################################
+    # m0 is the zeroth moment (total variance)
+    m0 = np.trapezoid(psd, f)
+    
+    # m1 is the first moment (centroid / mean frequency)
+    m1 = np.trapezoid(f * psd, f)
+    
+    # m2 is the second moment (spectral spread / inertia)
+    m2 = np.trapezoid((f**2) * psd, f)
+    
+    # m3: Third moment (Asymmetry / Tail weight)
+    m3 = np.trapezoid((f**3) * psd, f)
+    
+    # Combine into a moments array
+    m = np.array([m0, m1, m2, m3])
+
+    ###########################################################################
+    ## STEP #2 - Compute Spectral Bandwidth (nu) and Skewness (gamma)
+    ###########################################################################
+    # Bandwidth represents the spread of energy around the mean frequency
+    # nu ~ 0 for narrow-band (tides), nu > 1 for broad-band (turbulence)
+    if m1 > 0:
+        nu = np.sqrt(np.abs((m0 * m2) / (m1**2) - 1))
+
+        # Spectral Skewness: Normalized 3rd moment around the mean frequency (m1/m0)
+        f_mean = m1 / m0
+        sigma_f = np.sqrt(np.abs((m2 / m0) - f_mean**2)) # Spectral standard deviation
+        
+        # Integrate (f - f_mean)^3 * PSD
+        m3_central = np.trapezoid(((f - f_mean)**3) * psd, f)
+        skew = m3_central / (m0 * sigma_f**3) if sigma_f > 0 else 0
+
+    else:
+        nu = np.nan
+        skew = np.nan
+
+    ###########################################################################
+    ## STEP #3 - Compute Spectral Entropy (Hs)
+    ###########################################################################
+    # Normalize PSD to a probability distribution
+    psd_norm = psd / np.sum(psd)
+    
+    # Mask out zeros to avoid log errors
+    psd_norm = psd_norm[psd_norm > 0]
+    
+    # Compute Shannon Entropy
+    entropy = -np.sum(psd_norm * np.log(psd_norm))
+
+    ###########################################################################
+    ## STEP #4 - Compute Partitioned Variance Ratio 
+    ###########################################################################
+    fve = np.array([np.nan, np.nan])
+
+    if f_cutoff is not None:
+        # Create masks for frequency ranges
+        low_mask = f <= f_cutoff
+        high_mask = f > f_cutoff
+        
+        # Integrate variance in each band
+        var_low = np.trapezoid(psd[low_mask], f[low_mask])
+        var_high = np.trapezoid(psd[high_mask], f[high_mask])
+        
+        # Compute ratio (Mesoscale energy vs Tidal/Internal wave energy)
+        if var_high > 0:
+            fve[0] = var_low / m0   # Fraction of total variance in high frequencies
+            fve[1] = var_high / m0  # Fraction of total variance in high frequencies
+
+    ###########################################################################
+    ## STEP #4 - Compute Mean Period
+    ###########################################################################
+
+    # Compute spectral centroid (m1/m0)
+    spectral_centroid = m1 / m0
+
+    # Compute the period 
+    period = (1 / spectral_centroid) 
+
+    return m, nu, skew, entropy, fve, period

@@ -45,6 +45,110 @@ def detrend(data,x,mean = 0):
     return data_detrend
 
 
+
+#--- Plane Least Squares fit ---# 
+def plane_lsf(data, xcor, ycor, parameters, sigma):
+    """
+    Function for computing a plane fit to 2D data of order n using least squares.
+
+    Parameters
+    ----------
+    data : 2D array
+        Data field (may contain NaN values).
+    xcor, ycor : 2D arrays
+        Coordinate matrices (same shape as data).
+    parameters : int
+        Order of polynomial fit (0, 1, 2, or 3).
+    sigma : float
+        Measurement uncertainty (currently scalar).
+
+    Returns
+    -------
+    plane_fit : 2D array
+        Best-fit plane evaluated at all (x, y) points.
+    x_data : 1D array
+        Model coefficients.
+    x_data_sigma : 1D array
+        Standard deviation (uncertainty) of model coefficients.
+    L2_norm : float
+        L2 norm of the residuals between model and data.
+    """
+
+    # Import library 
+    import numpy as np
+
+    # Dimensions
+    nx, ny = data.shape
+
+    # Mask NaNs
+    mask = ~np.isnan(data)
+    data_flat = data[mask].ravel()
+    x_flat = xcor[mask].ravel()
+    y_flat = ycor[mask].ravel()
+
+    # --- Build design matrix A depending on polynomial order ---
+    if parameters == 0:
+        A = np.ones((len(data_flat), 1))
+    elif parameters == 1:
+        A = np.column_stack((np.ones_like(x_flat), x_flat, y_flat))
+    elif parameters == 2:
+        A = np.column_stack((np.ones_like(x_flat), x_flat, y_flat,
+                             x_flat**2, x_flat*y_flat, y_flat**2))
+    elif parameters == 3:
+        A = np.column_stack((np.ones_like(x_flat), x_flat, y_flat,
+                             x_flat**2, x_flat*y_flat, y_flat**2,
+                             x_flat**3, (x_flat**2)*y_flat,
+                             x_flat*(y_flat**2), y_flat**3))
+    else:
+        raise ValueError("parameters must be 0, 1, 2, or 3")
+
+    # --- Least squares fit (Ax = b) ---
+    # Solve using normal equations (consistent with MATLAB version)
+    ATA_inv = np.linalg.inv(A.T @ A)
+    x_data = ATA_inv @ A.T @ data_flat
+
+    # --- Compute fitted surface ---
+    if parameters == 0:
+        hfit = x_data[0] * np.ones(nx * ny)
+    elif parameters == 1:
+        hfit = (x_data[0]
+                + x_data[1]*xcor.ravel()
+                + x_data[2]*ycor.ravel())
+    elif parameters == 2:
+        hfit = (x_data[0]
+                + x_data[1]*xcor.ravel()
+                + x_data[2]*ycor.ravel()
+                + x_data[3]*xcor.ravel()**2
+                + x_data[4]*xcor.ravel()*ycor.ravel()
+                + x_data[5]*ycor.ravel()**2)
+    elif parameters == 3:
+        hfit = (x_data[0]
+                + x_data[1]*xcor.ravel()
+                + x_data[2]*ycor.ravel()
+                + x_data[3]*xcor.ravel()**2
+                + x_data[4]*xcor.ravel()*ycor.ravel()
+                + x_data[5]*ycor.ravel()**2
+                + x_data[6]*xcor.ravel()**3
+                + x_data[7]*(xcor.ravel()**2)*ycor.ravel()
+                + x_data[8]*xcor.ravel()*(ycor.ravel()**2)
+                + x_data[9]*ycor.ravel()**3)
+
+    # Reshape back to 2D
+    plane_fit = hfit.reshape((nx, ny))
+
+    # --- Covariance matrix and coefficient uncertainties ---
+    # (σ^2) * (AᵀA)⁻¹ is the standard least-squares covariance
+    C = (sigma**2) * ATA_inv
+    x_data_sigma = np.sqrt(np.diag(C))
+
+    # --- L2 norm of residuals ---
+    residuals = A @ x_data - data_flat
+    L2_norm = np.sqrt(np.sum(np.abs(residuals)**2))
+
+    return plane_fit, x_data, x_data_sigma, L2_norm
+
+
+
 ########### Unweighted least squares fit Function ###########
 def unweighted_lsf(data, x, parameters, freqs, sigma):
     
@@ -104,24 +208,24 @@ def unweighted_lsf(data, x, parameters, freqs, sigma):
     # Check if data is a masked array
     assert type(data) == np.ma.core.MaskedArray, "Data is not a masked array"
 
-    # Remove masked data points 
+    # make sure we have plain numpy arrays for x and data when doing math
+    # x_full is the full x (1D ndarray) used to evaluate hfit on original grid
+    x_full = np.ma.getdata(x).ravel()
 
-    #--- Masked data points exist ---# 
-    if np.size(data.mask) > 1:
+    # build boolean index of valid (unmasked) data points from the data mask
+    mask = np.asarray(data.mask)
+    if mask.size > 1:
+        valid = ~mask
+    else:
+        # mask could be a scalar False (no masked points)
+        valid = np.ones(data.shape, dtype=bool)
 
-        # Set mask
-        ind = data.mask
+    # select the valid points and force them to plain ndarrays (float)
+    x_n = np.asarray(x_full[valid], dtype=float).ravel()
+    data_n = np.asarray(np.ma.getdata(data)[valid], dtype=float).ravel()
 
-        # Remove masked data points from time and data
-        x_n = x[~ind]
-        data_n = data[~ind]
-
-    #--- No masked values exist ---#
-    elif np.size(data.mask) == 1:
-
-        # Set new variables
-        x_n = x
-        data_n = data
+    if len(data_n) == 0:
+        raise ValueError("No valid (unmasked) data points available for fitting.")
     
     # Perform Least squares fit based on the number of parameters (0 sinusoid fit, linear fit)
     if parameters == 0:
