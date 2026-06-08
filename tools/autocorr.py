@@ -160,7 +160,7 @@ def compute_autocorr_optimize(data, x, lag, bias, norm = 0):
     # Combine positive and negative lag arrays 
 
     #--- Lag ---#  
-    x_ref_pos = x - x[0]
+    x_ref_pos = x[:lag] - x[0]
     x_ref_neg = -1 * np.flip(x_ref_pos)[:-1]
 
     #--- Autocovariance ---# 
@@ -254,8 +254,8 @@ def compute_autocorr(data, x, lag, bias, norm = 0):
     N_eff = np.sum(~data.mask)
 
     # Initialize autocovariance and autocorrelation arrays
-    R         = np.zeros(lag)   # Autocovariance
-    rho       = np.zeros(lag)   # Autocorrelation 
+    R          = np.zeros(lag)   # Autocovariance
+    rho        = np.zeros(lag)   # Autocorrelation 
     c_pairs_m  = np.zeros(lag)
     c_pairs_nm = np.zeros(lag)
 
@@ -276,8 +276,8 @@ def compute_autocorr(data, x, lag, bias, norm = 0):
             Rnorm = (1/N_eff) * np.ma.dot(fix,running) #np.sum(data * np.conj(data))
 
     #--- Note ---# 
-    # The normalization is the same for the biased, unbiased, and unbiased estimates when normalizing with the zeroth lag
-    #  because the factors in front of the inner product are equivalent: 
+    # The normalization is the same for the biased, unbiased, and unbiased tapered estimates when normalizing with the zeroth lag
+    # because the factors in front of the inner product are equivalent: 
     # 
     #       1/n_eff = (1 / n_eff) * (n / N) =  1/N_eff
     # 
@@ -391,7 +391,7 @@ def compute_autocorr(data, x, lag, bias, norm = 0):
 
 
 
-#--- Decorrelation Scale Analysis ---%
+#--- Decorrelation Scale Function (Integral Scale Estimate) ---%
 def compute_decor_scale_optimize(autocorr,x_ref,dx,bias,norm):
 
     """
@@ -439,7 +439,7 @@ def compute_decor_scale_optimize(autocorr,x_ref,dx,bias,norm):
 
     # Set the length of data series and data interval
     N = len(autocorr)      # length of one-sided autocorrelation function (and number of samples in data record)
-    R = N * dx                 # length of the data series (units of time or space)
+    R = N * dx             # length of the data series (units of time or space)
     
     # Normalize by the zeroth lag 
     if norm == 0: 
@@ -463,10 +463,24 @@ def compute_decor_scale_optimize(autocorr,x_ref,dx,bias,norm):
             # If using biased estimator, do not apply weights; just use raw autocorrelation values
             integrand = autocorr_full
 
+        # Interpolate over nans 
+        if np.any(np.isnan(integrand)):
+
+            # Find nan indices
+            nans = np.isnan(integrand)
+
+            # Linearly interpolate over nans
+            integrand[nans] = np.interp(x_ref_full[nans], x_ref_full[~nans], integrand[~nans]) 
+
+            # Define clean variable
+            integrand_clean = integrand
+        else: 
+            integrand_clean = integrand
+
         # Compute the cumulative integral of the (possibly weighted) autocorrelation function
         # The result is a 1D array where each entry gives the integral from the first lag up to that point in x_ref_full
         # Setting initial=0 ensures the integral starts at zero
-        integral_full = cumulative_trapezoid(integrand, x_ref_full, initial=0)
+        integral_full = cumulative_trapezoid(integrand_clean, x_ref_full, initial=0)
 
         # Determine the index corresponding to zero lag in the full symmetric autocorrelation array
         center = N - 1  # Since autocorr_full has length 2N - 1, the center index is at N-1
@@ -521,8 +535,9 @@ def compute_decor_scale_optimize(autocorr,x_ref,dx,bias,norm):
         # Take the maximum integral value as the conservative estimate of the decorrelation scale
         scale = np.nanmax(scale_N)
 
-    return scale 
+    return scale
 
+#--- Decorrelation Scale Function (Integral Scale Estimate) ---%
 def compute_decor_scale(autocorr,x_ref,dx,bias,norm):
 
     """
@@ -1460,3 +1475,803 @@ def compute_glider_autocorr_interp(dist, data, water_depth, L, on_lim, off_lim, 
         plot_depth_data_autocorr(dist, dist_on, dist_trans, dist_off, water_depth, water_depth_on, water_depth_trans, water_depth_off, data, data_on, data_trans, data_off, autocorr_on, autocorr_trans, autocorr_off, on_lim, off_lim, fontsize, dirOut)
 
     return autocorr_on, autocorr_trans, autocorr_off, autocorr_on_n, autocorr_trans_n, autocorr_off_n, autocov_on, autocov_trans, autocov_off, autocov_full, L_on, L_trans, L_off, dist_on, dist_trans, dist_off, dist_int, dist_scale_on_n, dist_scale_trans_n, dist_scale_off_n
+
+
+
+#--- Segment time series ---# 
+def segment_time_series(time, data, segment_years=1, overlap=0.5):
+    """
+    Split a time series into overlapping segments.
+
+    Parameters
+    ----------
+    time : ndarray of datetime64
+        Time vector (1D array of datetime objects).
+    data : ndarray
+        Data vector (1D array aligned with `time`).
+    segment_years : float, optional
+        Length of each segment in years (default is 1).
+        Can be fractional (e.g., 0.5 = 6 months).
+    overlap : float, optional
+        Fraction of overlap between consecutive segments (0–1).
+        For example, 0.5 means 50% overlap.
+
+    Returns
+    -------
+    segments : list of tuples
+        Each entry is (time_segment, data_segment), where:
+        - time_segment : ndarray of datetimes for that segment
+        - data_segment : ndarray of data values for that segment
+    """
+
+    # Import libraries
+    from datetime import timedelta
+
+    # Start and end times of the full time series
+    start_time = time[0]
+    end_time = time[-1]
+
+    # Step size between the starts of consecutive segments (in years)
+    # Example: 1-year window with 50% overlap -> step = 0.5 years
+    step = segment_years * (1 - overlap)
+
+    # Store the (time, data) pairs for each segment
+    segments = []
+
+    # Initialize the first segment start
+    seg_start = start_time
+
+    while True:
+        # Define the end time for this segment
+        seg_end = seg_start + timedelta(days=int(365*segment_years))
+
+        # If the segment would extend beyond the available record, stop
+        if seg_end > end_time:
+            break
+
+        # Create a mask to select time points within this segment
+        mask = (time >= seg_start) & (time < seg_end)
+
+        # Append the selected time and data as one segment
+        segments.append((time[mask], data[mask]))
+
+        # Move the start time forward by the step (handles overlap)
+        seg_start += timedelta(days=int(365*step))
+
+    return segments
+
+
+
+#--- Bootstrapping estimate ---#  
+def bootstrap_decorrelation_scale(data, x, window_length, dx, bias='unbiased', norm=0,
+                                  stride=1, m=None, B=1000, lag=None, random_seed=None):
+    """
+    Bootstrap estimation of the decorrelation scale from a 1D data record.
+
+    Parameters
+    ----------
+    data : array
+        Full data record (1D array). Make sure to filter data beforehand 
+        (e.g., remove annual and semi-annual cycles)! 
+    x : array
+        Time or spatial vector corresponding to `data`.
+    window_length : int
+        Length of each sliding window (number of points).
+    dx : float
+        Distance between consecutive data points (in time or space units).
+    bias : str
+        'biased', 'unbiased', or 'unbiased_tapered' for autocorrelation computation.
+    norm : int
+        0 = normalize by zero-lag variance, 1 = normalize by first lag.
+    stride : int
+        Increment to slide the window across the time series.
+    m : int or None
+        Number of windows to sample per bootstrap replicate.
+        If None, defaults to all windows (J) with replacement.
+    B : int
+        Number of bootstrap replicates.
+    lag : int or None
+        Maximum lag for autocorrelation. If None, defaults to window_length.
+    random_seed : int or None
+        Random seed for reproducibility.
+
+    Returns
+    -------
+    mean_tau : float
+        Mean decorrelation scale across bootstrap replicates.
+    std_tau : float
+        Standard deviation of decorrelation scales.
+    stdm_tau : float
+        Standard error of mean decorrelation scales across bootstrap replicates.
+    ci95 : tuple (float, float)
+        95% confidence interval from bootstrap percentiles.
+    tau_boot: array
+        Bootstrap decorrelation scale samples. 
+    """
+
+    # Import functions
+    import numpy as np
+    from lsf import detrend
+    from autocorr import compute_decor_scale_optimize, compute_autocorr_optimize
+
+    # Initialize random number generator for reproducibility (for uniformly drawing m windows from collection)
+    rng = np.random.default_rng(random_seed)
+
+    # Set the total length of time series
+    N = len(data)  
+
+    # Set the number of lags for the autocorrelation function 
+    if lag is None:
+        lag = window_length  # default maximum lag is the window length
+
+    ################################################################
+    # --- Step 1: Determine starting indices for sliding windows ---
+    ################################################################
+
+    # Find starting indicies for sliding windows
+    start_indices = np.arange(0, N - window_length + 1, stride)
+
+    # Set total number of windows
+    J_total = len(start_indices)  
+
+    ################################################################
+    # --- Step 2: Compute positive-lag autocorrelations for each window ---
+    ################################################################
+
+    # Initialize autocorrelation function array 
+    acfs = []
+
+    # Loop through starting indicies for J windows 
+    for s in start_indices:
+
+        # Extract window of data
+        window   = data[s:s + window_length]
+        x_window = x[s:s + window_length]
+
+        # Detrend window 
+        window_dt = detrend(window, x_window, mean = 0)
+
+        # Compute autocorrelation using optimized function
+        rho_pos, _, _, _, x_ref_pos, _ = compute_autocorr_optimize(window_dt, x_window,
+                                                                   lag, bias, norm)
+        
+        # Store autocorrelation and corresponding lags
+        acfs.append((rho_pos, x_ref_pos))
+
+    # Convert lists to arrays for easier indexing
+    rho_array = np.array([r for r, _ in acfs])
+    x_ref_array = np.array([xr for _, xr in acfs])
+
+    ################################################################
+    # --- Step 3: Set number of windows per bootstrap replicate ---
+    ################################################################
+
+    #######
+    # Note
+    # ----
+    # When m = J_total (the number of windows draw equals the total number of windows), we will 
+    # sample with replacement because if we sample without replacement, we could get the same 
+    # decorrelation scale estimate with each bootstrapping interation. This approach should 
+    # only be used when the windows are independent of each other. If they are dependent, this 
+    # would lead to an underestimation of the uncertainty. 
+    # 
+    # When m < J_total (the number of windows draw is less than the total number of windows), we will 
+    # sample without replacement. This will help when the windows of more strongly correlated 
+    # with each other so that the uncertainty is on underestimated. 
+
+    # Specify whether we will use sampling with or without replacement. 
+    if m is None:
+        m = J_total           # default: use all windows
+        with_replacement = True
+    else:
+        if m == J_total: 
+            with_replacement = True   # subsampling with replacement
+        if m < J_total: 
+            with_replacement = False  # subsampling without replacement
+        if m > J_total:
+            raise ValueError("m cannot exceed the total number of windows.")
+
+    ################################################################
+    # --- Step 4: Run bootstrap ---
+    ################################################################
+
+    # Initialize bootstrapping tau array
+    tau_boot = np.empty(B, dtype=float) 
+
+    # Loop through bootstrapping iterations 
+    for b in range(B):
+
+        # Sample window indices
+        if with_replacement:
+            idx = rng.integers(0, J_total, size=m)  # with replacement
+        else:
+            idx = rng.choice(J_total, size=m, replace=False)  # without replacement
+
+        # Compute mean autocorrelation across sampled windows
+        mean_rho = np.nanmean(rho_array[idx, :], axis=0)
+
+        # Use x_ref from first sampled window (assumes all windows same spacing)
+        mean_x_ref = x_ref_array[idx[0], :]
+
+        # Compute decorrelation scale using optimized function
+        tau_boot[b] = compute_decor_scale_optimize(mean_rho, mean_x_ref, dx, 'unbiased', norm)
+
+    ################################################################
+    # --- Step 5: Compute statistics from bootstrap replicates ---
+    ################################################################
+
+    # Mean decorrelation scale
+    mean_tau = np.mean(tau_boot)  
+
+    # Standard deviation 
+    std_tau = np.std(tau_boot, ddof=1) 
+
+    # Standard error 
+    stdm_tau = std_tau / np.sqrt(tau_boot.size)
+
+    # 95% confidence intervals
+    ci_lower, ci_upper = np.percentile(tau_boot, [2.5, 97.5])  # 95% CI
+
+    return mean_tau, std_tau, stdm_tau, (ci_lower, ci_upper), tau_boot
+
+##--- Windowing decorrelation scale Analysis (Mask Aware)---# 
+def windowed_decorrelation_scale(data, t, dt, scales=None, norm=0, overlap=0.0, return_windows=False, valid_frac=0.8, detrend_option=True):
+
+    """
+    Compute the decorrelation as a function of scale (Mahadevan et al. 2002 style)
+    for a 1D time series, with option for overlapping windows and masking support. 
+
+    Parameters
+    ----------
+    data : array_like
+        Input data time series (1D). Can contain NaNs, which will be masked.
+    t : array_like
+        Input time vector. Can contain NaNs, which will be masked.
+    dt : float
+        Time increment of time series. 
+    scales : list or array, optional
+        List of window sizes (in samples). Defaults to powers of 2 up to length of data.
+    norm : bool, optional
+        The norm argument in the autocorrelation and decorrelations functions (normalization of the autocorrelation function). 
+    overlap : float, optional
+        Fractional overlap between adjacent windows (0 = no overlap, 0.5 = 50% overlap).
+    return_windows : bool, optional
+        If True, also returns dictionary of per-window decorrelation scales.
+    valid_frac : float, optional
+        Fraction of valid (non-NaN) data required in each window. Default is 0.8.
+    detrend_option : bool, optional
+        If True, detrend each window before computing autocorrelation. Default is True.
+
+    Returns
+    -------
+    scales : ndarray
+        Array of scales (window lengths).
+    Lt_av : np.ma.MaskedArray
+        Decorrelation scale at each scale (masked where not valid).
+    Lt_stdm: np.ma.MaskedArray
+        Decorrelation scale standard error of the mean at each scale (masked where not valid).
+    window_decor_dict : dict, optional
+        Per-scale decorrelation scale of individual windows.
+    """
+
+    # Import libraries 
+    import numpy as np 
+    from lsf import detrend
+    from autocorr import compute_decor_scale_optimize, compute_autocorr_optimize
+
+    #-----------------------------------#
+    # STEP #1 - Compute Decorrelation Scale
+    #-----------------------------------#
+
+    # Set nans to masked values and set total length of the time series
+    data = np.ma.masked_invalid(data)
+    t = np.ma.masked_invalid(t)
+    N = len(data)
+
+    # Validate overlap input
+    if not (0 <= overlap < 1):
+        raise ValueError("overlap must be between 0 and 1 (fraction)")
+
+    # If no scales are provided, use powers of 2 up to the length of the time series
+    if scales is None:
+        max_power = int(np.floor(np.log2(N)))
+        scales = [2**k for k in range(3, max_power+1)] # e.g., [8,16,32,...]
+
+    # Ensure scales is a NumPy array
+    scales = np.array(scales)
+
+    # Compute the duration of each of the scales
+    duration = scales * dt
+
+    # Initialize list to store average decorrelation per scale and dictionary to 
+    # optionally store per-window decorrelation scales
+    Lt_av = np.ma.masked_all(len(scales))
+    Lt_stdm = np.ma.masked_all(len(scales))
+    window_decor_dict = {}
+
+    # Loop over scale
+    for i, L in enumerate(scales):
+
+        # Start indices for windows of length L
+        step = max(1, int(L * (1 - overlap)))
+        starts = np.arange(0, N - L + 1, step)
+
+        # Skip if the window size is too large for the series
+        if len(starts) == 0:
+            continue 
+
+        # Store decorrelation scale of each window
+        window_autocorr = []
+        window_lag      = []
+        window_decor    = []
+
+        # Loop through windows
+        for s in starts:
+
+            # Extract segment/window
+            segment = data[s:s+L]
+            t_seg   = t[s:s+L]
+
+            # Require >= valid_frac fraction of valid data
+            if (segment.count() >= valid_frac * L) and (t_seg.count() >= valid_frac * L):
+
+                # Detrend window 
+                if detrend_option:
+                    segment_dt = detrend(segment,t_seg,mean=0)
+                else:
+                    segment_dt = segment
+
+                # Compute autocorrelation function
+                autocorr, _, _, _, lag, _ = compute_autocorr_optimize(segment_dt, t_seg, len(segment), 'biased', norm)
+
+                # Compute the decorrelation scale
+                seg_decor = compute_decor_scale_optimize(autocorr,lag,dt,'unbiased',norm)
+
+                # Save the autocorrelation and decorrelation scales 
+                window_autocorr.append(autocorr)
+                window_lag.append(lag)
+                window_decor.append(seg_decor)
+
+        # Skip if no valid windows
+        if len(window_decor) == 0:
+            continue
+
+        # Store per-window decorrelation scales
+        window_decor_dict[L] = window_decor
+
+        # Convert window_autocor from a list to an array
+        window_autocorr = np.array(window_autocorr)
+        window_lag = np.array(window_lag)
+
+        # Average autocorrelation function across all windows for this scale 
+        window_autocorr_av = np.nanmean(window_autocorr,axis=0)
+        window_lag_av = np.nanmean(window_lag,axis=0)
+
+        # Compute the standard deviation and the number of samples 
+        window_autocorr_std = np.nanstd(window_autocorr, axis=0, ddof=1)
+        window_autocorr_n   = np.count_nonzero(~np.isnan(window_autocorr), axis=0)
+
+        # Compute the standard error of the mean (assuming that each data point is an independent observations)
+        window_autocorr_stdm   = window_autocorr_std/np.sqrt(window_autocorr_n)
+
+        # Skip if averaged autocorr is all NaN
+        if np.all(np.isnan(window_autocorr_av)):
+            continue
+
+        # Compute average decorrelation scale and uncertainty
+        try:
+
+            # Compute average decorrelation scale
+            window_decor_av = compute_decor_scale_optimize(
+                window_autocorr_av, window_lag_av, dt, 'biased', norm
+            )
+
+            # Estimate the decorrelation scale's uncertainty by perturbing the autocorrelation function by 1 standard deviation
+            window_decor_ustd = compute_decor_scale_optimize(window_autocorr_av + window_autocorr_stdm, 
+                                                    window_lag_av ,dt,'unbiased',norm)
+            window_decor_lstd = compute_decor_scale_optimize(window_autocorr_av - window_autocorr_stdm, 
+                                                    window_lag_av ,dt,'unbiased',norm)
+
+            # Compute the average standard error 
+            std_upper = window_decor_ustd - window_decor_av
+            std_lower = abs(window_decor_lstd - window_decor_av)
+            window_decor_stdm  = np.mean([std_upper, std_lower])
+
+        except ValueError:
+
+            # catches the "array of sample points is empty" error
+            continue
+
+        # Save the decorrelation scale
+        Lt_av[i] = window_decor_av 
+        Lt_stdm[i] = window_decor_stdm
+
+    # Return results, optionally including per-window decorrelation scales
+    if return_windows:
+        return scales, Lt_av, Lt_stdm, window_decor_dict
+    else:
+        return scales, Lt_av, Lt_stdm
+
+
+
+##--- Windowing decorrelation scale Analysis (Mask Aware) with Boot Strap method---# 
+def windowed_decorrelation_scale_boot(data, t, dt, scales=None, norm=False, overlap=0.0, return_windows=False, valid_frac=0.8):
+
+    """
+    Compute the decorrelation as a function of scale (Mahadevan et al. 2002 style)
+    for a 1D time series using bootstrapping approach.  
+
+    Parameters
+    ----------
+    data : array_like
+        Input data time series (1D). Can contain NaNs, which will be masked.
+    t : array_like
+        Input time vector. Can contain NaNs, which will be masked.
+    dt : float
+        Time increment of time series. 
+    scales : list or array, optional
+        List of window sizes (in samples). Defaults to powers of 2 up to length of data.
+    norm : bool, optional
+        If True, the decorrelation scale is normalized by the duration of the record. 
+    overlap : float, optional
+        Fractional overlap between adjacent windows (0 = no overlap, 0.5 = 50% overlap).
+    return_windows : bool, optional
+        If True, also returns dictionary of per-window decorrelation scales.
+    valid_frac : float, optional
+        Fraction of valid (non-NaN) data required in each window. Default is 0.8.
+
+    Returns
+    -------
+    scales : ndarray
+        Array of scales (window lengths).
+    Lt_av : np.ma.MaskedArray
+        Decorrelation scale at each scale (masked where not valid).
+    Lt_stdm: np.ma.MaskedArray
+        Decorrelation scale standard error of the mean at each scale (masked where not valid).
+    window_decor_dict : dict, optional
+        Per-scale decorrelation scale of individual windows.
+    """
+
+    # Import libraries 
+    import numpy as np 
+    from lsf import detrend
+    from autocorr import compute_decor_scale_optimize, compute_autocorr_optimize
+
+    #-----------------------------------#
+    # STEP #1 - Compute tau(L)
+    #-----------------------------------#
+
+    # Set nans to masked values and set total length of the time series
+    data = np.ma.masked_invalid(data)
+    t = np.ma.masked_invalid(t)
+    N = len(data)
+
+    # Validate overlap input
+    if not (0 <= overlap < 1):
+        raise ValueError("overlap must be between 0 and 1 (fraction)")
+
+    # If no scales are provided, use powers of 2 up to the length of the time series
+    if scales is None:
+        max_power = int(np.floor(np.log2(N)))
+        scales = [2**k for k in range(3, max_power+1)] # e.g., [8,16,32,...]
+
+    # Ensure scales is a NumPy array
+    scales = np.array(scales)
+
+    # Compute the duration of each of the scales
+    duration = scales * dt
+
+    # Initialize list to store average decorrelation per scale and dictionary to 
+    # optionally store per-window decorrelation scales
+    Lt_av = np.ma.masked_all(len(scales))
+    Lt_stdm = np.ma.masked_all(len(scales))
+    window_decor_dict = {}
+
+    # Loop over scale
+    for i, L in enumerate(scales):
+
+        # Start indices for windows of length L
+        step = max(1, int(L * (1 - overlap)))
+        starts = np.arange(0, N - L + 1, step)
+
+        # Skip if the window size is too large for the series
+        if len(starts) == 0:
+            continue 
+
+        # Store decorrelation scale of each window
+        window_autocorr = []
+        window_lag      = []
+        window_decor    = []
+
+        # Loop through windows
+        for s in starts:
+
+            # Extract segment/window
+            segment = data[s:s+L]
+            t_seg   = t[s:s+L]
+
+            # Require >= valid_frac fraction of valid data
+            if (segment.count() >= valid_frac * L) and (t_seg.count() >= valid_frac * L):
+
+                # Detrend window 
+                segment_dt = detrend(segment,t_seg,mean=0)
+
+                # Compute autocorrelation function
+                autocorr, _, _, _, lag, _ = compute_autocorr_optimize(segment_dt, t_seg, len(segment), 'biased', 0)
+
+                # Compute the decorrelation scale
+                seg_decor = compute_decor_scale_optimize(autocorr,lag,dt,'unbiased',0)
+
+                # Save the autocorrelation and decorrelation scales 
+                window_autocorr.append(autocorr)
+                window_lag.append(lag)
+                window_decor.append(seg_decor)
+
+        # Skip if no valid windows
+        if len(window_decor) == 0:
+            continue
+
+        # Normalize by duration and store per-window decorrelation scales
+        if norm:
+            window_decor = np.array(window_decor) / duration[i]
+        window_decor_dict[L] = window_decor
+
+        # Convert window_autocor from a list to an array
+        window_autocorr = np.array(window_autocorr)
+        window_lag = np.array(window_lag)
+
+        # Average autocorrelation function across all windows for this scale 
+        window_autocorr_av = np.nanmean(window_autocorr,axis=0)
+        window_lag_av = np.nanmean(window_lag,axis=0)
+
+        # Compute the standard deviation and the number of samples 
+        window_autocorr_std = np.nanstd(window_autocorr, axis=0, ddof=1)
+        window_autocorr_n   = np.count_nonzero(~np.isnan(window_autocorr), axis=0)
+
+        # Compute the standard error of the mean (assuming that each data point is an independent observations)
+        window_autocorr_stdm   = window_autocorr_std/np.sqrt(window_autocorr_n)
+
+        # Skip if averaged autocorr is all NaN
+        if np.all(np.isnan(window_autocorr_av)):
+            continue
+
+        # Compute average decorrelation scale and uncertainty
+        try:
+
+            # Compute average decorrelation scale
+            window_decor_av = compute_decor_scale_optimize(
+                window_autocorr_av, window_lag_av, dt, 'unbiased', 0
+            )
+
+            # Estimate the decorrelation scale's uncertainty by perturbing the autocorrelation function by 1 standard deviation
+            window_decor_ustd = compute_decor_scale_optimize(window_autocorr_av + window_autocorr_stdm, 
+                                                    window_lag_av ,dt,'unbiased',0)
+            window_decor_lstd = compute_decor_scale_optimize(window_autocorr_av - window_autocorr_stdm, 
+                                                    window_lag_av ,dt,'unbiased',0)
+
+            # Compute the average standard error 
+            std_upper = window_decor_ustd - window_decor_av
+            std_lower = abs(window_decor_lstd - window_decor_av)
+            window_decor_stdm  = np.mean([std_upper, std_lower])
+
+        except ValueError:
+
+            # catches the "array of sample points is empty" error
+            continue
+
+        # Normalize the decorrelation scale
+        if norm:
+            Lt_av[i]   = window_decor_av / duration[i]
+            Lt_stdm[i] = window_decor_stdm / duration[i]
+        else: 
+            Lt_av[i] = window_decor_av 
+            Lt_stdm[i] = window_decor_stdm
+
+    # Return results, optionally including per-window decorrelation scales
+    if return_windows:
+        return scales, Lt_av, Lt_stdm, window_decor_dict
+    else:
+        return scales, Lt_av, Lt_stdm
+    
+
+#--- Computing decorrelation scale mean and uncertainty from an ensemble ---# 
+def compute_decorrelation_stats(autocorr, lag, dx, compute_decor_scale_optimize, sample_axis=0):
+    """
+    Compute mean, standard deviation, and uncertainty estimates of the
+    decorrelation scale from an ensemble of autocorrelation functions.
+
+    Parameters
+    ----------
+    autocorr : ndarray
+        Array of autocorrelation functions, typically shape (n_samples, n_lags).
+        Each row corresponds to one realization of the autocorrelation function.
+    lag : ndarray
+        1D array of spatial or temporal lags corresponding to the lag dimension.
+    dx : float
+        Spatial or temporal resolution used in the decorrelation scale integration.
+    compute_decor_scale_optimize : callable
+        Function to compute the decorrelation scale. Must accept arguments:
+        (autocorr, lag, dx, norm_type, zero_crossing_flag).
+    sample_axis : int, default=0
+        Axis corresponding to independent samples (over which to average).
+
+    Returns
+    -------
+    L_mean : float
+        Mean decorrelation scale computed from the ensemble-mean autocorrelation.
+    L_stdm : float
+        Estimated uncertainty (standard error) of the decorrelation scale.
+    autocorr_m : ndarray
+        Mean autocorrelation function across samples.
+    autocorr_stdm : ndarray
+        Standard error of the mean autocorrelation function across samples.
+    """
+
+    # Import libraries
+    import numpy as np
+
+    # --- Validate sample_axis ---
+    if sample_axis < 0:
+        sample_axis = autocorr.ndim + sample_axis
+    if sample_axis >= autocorr.ndim:
+        raise ValueError(f"Invalid sample_axis={sample_axis} for autocorr with shape {autocorr.shape}")
+
+    # --- Compute statistics along sample dimension ---
+    autocorr_m = np.nanmean(autocorr, axis=sample_axis)
+    autocorr_std = np.nanstd(autocorr, axis=sample_axis, ddof=1)
+    autocorr_n = np.count_nonzero(~np.isnan(autocorr), axis=sample_axis)
+    autocorr_stdm = autocorr_std / np.sqrt(autocorr_n)
+
+    # --- Compute decorrelation scale for mean autocorrelation ---
+    L_mean = compute_decor_scale_optimize(autocorr_m, lag, dx, 'unbiased', 0)
+
+    # --- Perturb by ±1 standard deviation of the mean ---
+    L_upper = compute_decor_scale_optimize(autocorr_m + autocorr_stdm, lag, dx, 'unbiased', 0)
+    L_lower = compute_decor_scale_optimize(autocorr_m - autocorr_stdm, lag, dx, 'unbiased', 0)
+
+    # --- Compute uncertainty estimate ---
+    std_upper = L_upper - L_mean
+    std_lower = abs(L_lower - L_mean)
+    L_stdm = np.mean([std_upper, std_lower])
+
+    return L_mean, L_stdm, autocorr_m, autocorr_stdm
+    
+
+
+#--- Compute multiple estimates of the decorrelation scale ---# 
+def compute_decorrelation_scales(rho, lags, max_lag_fit=None):
+
+    """
+    Compute multiple decorrelation scales from a positive lag autocorrelation function.
+
+    Parameters
+    ----------
+    rho : array
+        Positive lag autocorrelation function.
+    lags : array
+        Positive lag values (time or space) corresponding to rho.
+    max_lag_fit : float, optional
+        Maximum lag to use when fitting exponential model. 
+        If None, use first quarter of lags.
+
+    Returns
+    -------
+    scales : dict
+        Dictionary with estimates for (all are one-sided unless labeled 'full'):
+        - 'efolding'        : lag > 0 where rho = 1/e
+        - 'efolding_full'   : 2 * efolding (for symmetric ACF)
+        - 'zero_crossing'   : first positive lag where rho crosses 0
+        - 'zero_crossing_full' : 2 * zero_crossing
+        - 'hwhm'            : half-width at half-maximum (rho = 0.5)
+        - 'fwhm'            : full-width at half-maximum = 2 * hwhm
+        - 'exp_fit'         : L from rho ~ exp(-lag / L) (positive lags)
+        - 'exp_fit_full'    : 2 * exp_fit (for symmetric exponential ACF)
+    """
+
+    # Import library
+    import numpy as np
+    from scipy.optimize import curve_fit
+
+    # Dictionary to store results
+    scales = {}
+
+    # Ensure inputs are numpy arrays
+    rho = np.asarray(rho)
+    lags = np.asarray(lags)
+
+    # ============================================================
+    # 1. e-Folding scale (lag where rho = 1/e ≈ 0.3679)
+    # ============================================================
+
+    # Define target value
+    target = 1/np.e
+
+    # Find indices where rho drops below the target
+    below = np.where(rho <= target)[0]
+
+    # If a crossing exists and not at lag=0
+    if len(below) > 0 and below[0] > 0:
+        # Index of first point below the target
+        i = below[0]
+        # Linearly interpolate between the last point above and the first below
+        L_e = np.interp(target, [rho[i-1], rho[i]], [lags[i-1], lags[i]])
+    else:
+        # If no crossing, return NaN
+        L_e = np.nan
+
+    # Store one and two-sided estimates
+    scales["efolding"] = L_e
+    scales["efolding_full"] = 2 * L_e if np.isfinite(L_e) else np.nan
+
+    # ============================================================
+    # 2. Zero-crossing scale (lag where rho first crosses 0)
+    # ============================================================
+
+    # Find indices where rho drops below or equal to 0
+    below = np.where(rho <= 0)[0]
+
+    # If a crossing exists
+    if len(below) > 0 and below[0] > 0:
+        # Index of first point below zero
+        i = below[0]
+        # Interpolate to find the exact crossing point
+        zc = np.interp(0, [rho[i-1], rho[i]], [lags[i-1], lags[i]])
+    else:
+        # If no crossing, return NaN
+        zc = np.nan
+
+    # Store one and two-sided estimates
+    scales["zero_crossing"] = zc
+    scales["zero_crossing_full"] = 2 * zc if np.isfinite(zc) else np.nan
+
+    # ============================================================
+    # 3. Half-width at half-maximum (lag where rho = 0.5)
+    # ============================================================
+
+    # Find indices where rho drops below 0.5
+    below = np.where(rho <= 0.5)[0]
+
+    # If a crossing exists
+    if len(below) > 0 and below[0] > 0:
+        # Index of first point below 0.5
+        i = below[0]
+        # Interpolate to find the half-width
+        hwhm = np.interp(0.5, [rho[i-1], rho[i]], [lags[i-1], lags[i]])
+    else:
+        # If no crossing, return NaN
+        hwhm = np.nan
+
+    # Store one and two-sided estimates
+    scales["hwhm"] = hwhm
+    scales["fwhm"] = 2 * hwhm if np.isfinite(hwhm) else np.nan
+
+    # ============================================================
+    # 4. Exponential fit (fit rho ~ exp(-lag/L) to small-lag ACF)
+    # ============================================================
+
+    # If no maximum lag for fitting is given, default to first quarter of lags
+    if max_lag_fit is None:
+        max_lag_fit = lags[len(lags)//4]
+
+    # Create mask to restrict fitting region
+    mask = (lags >= 0) & (lags <= max_lag_fit)
+
+    # Define exponential model for curve fitting
+    def exp_model(lag, L):
+        return np.exp(-lag / L)
+
+    try:
+        # Fit exponential model to rho within mask region
+        popt, _ = curve_fit(exp_model, lags[mask], rho[mask], p0=[lags[1]])
+        # Extract fitted scale parameter
+        L_fit = popt[0]
+    except Exception:
+        # If fitting fails, return NaN
+        L_fit = np.nan
+
+    # Store one and two-sided estimates
+    scales["exp_fit"] = L_fit
+    scales["exp_fit_full"] = 2 * L_fit if np.isfinite(L_fit) else np.nan
+
+    return scales
+
